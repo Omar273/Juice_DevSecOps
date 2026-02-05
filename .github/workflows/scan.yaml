@@ -1,0 +1,86 @@
+name: DevSecOps Pipeline (DAG)
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+# =========================
+# 1️⃣ BUILD JOB
+# =========================
+  build:
+    name: Build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build step
+        run: |
+          echo "Building application..."
+          echo "Build completed"
+
+# =========================
+# 2️⃣ SAST SCAN (SEMGREP)
+# =========================
+  sast:
+    name: SAST - Semgrep
+    needs: build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Semgrep
+        run: |
+          pip install semgrep
+
+      - name: Run Semgrep Scan
+        shell: powershell
+        run: |
+          semgrep scan --config=auto --json . | Out-File -Encoding utf8 semgrep.json
+          exit 0
+
+      - name: Upload Semgrep Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep.json
+
+# =========================
+# 3️⃣ DEFECTDOJO IMPORT
+# =========================
+  defectdojo:
+    name: Upload to DefectDojo
+    needs: sast
+    runs-on: windows-latest
+
+    env:
+      DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+      DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+
+    steps:
+      - name: Download Semgrep Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: semgrep-report
+
+      - name: Upload Scan to DefectDojo
+        shell: powershell
+        run: |
+          curl.exe -X POST "$env:DEFECTDOJO_URL/api/v2/import-scan/" `
+            -H "Authorization: Token $env:DEFECTDOJO_API_KEY" `
+            -F "scan_type=Semgrep JSON Report" `
+            -F "file=@semgrep.json" `
+            -F "product_name=DevSecOps_Project" `
+            -F "engagement_name=GitHub Actions" `
+            -F "test_title=Semgrep SAST Scan" `
+            -F "auto_create_context=true"
