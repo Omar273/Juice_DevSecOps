@@ -7,46 +7,59 @@ on:
 
 jobs:
 # =========================
-# 1️⃣ BUILD
+# 1️⃣ BUILD JOB
 # =========================
   build:
+    name: Build
     runs-on: windows-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - run: echo "Build OK"
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build step
+        run: |
+          echo "Building application..."
+          echo "Build completed"
 
 # =========================
-# 2️⃣ SAST (SEMGREP)
+# 2️⃣ SAST SCAN (SEMGREP)
 # =========================
   sast:
+    name: SAST - Semgrep
     needs: build
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install Semgrep
-        run: pip install semgrep
+        run: |
+          pip install semgrep
 
-      - name: Run Semgrep
+      - name: Run Semgrep Scan
         shell: powershell
         run: |
           semgrep scan --config=auto --json . | Out-File -Encoding utf8 semgrep.json
           exit 0
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Semgrep Artifact
+        uses: actions/upload-artifact@v4
         with:
           name: semgrep-report
           path: semgrep.json
 
 # =========================
-# 3️⃣ DEFECTDOJO IMPORT (SINGLE STEP)
+# 3️⃣ DEFECTDOJO IMPORT
 # =========================
   defectdojo:
+    name: Upload to DefectDojo
     needs: sast
     runs-on: windows-latest
 
@@ -55,7 +68,8 @@ jobs:
       DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
 
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download Semgrep Artifact
+        uses: actions/download-artifact@v4
         with:
           name: semgrep-report
 
@@ -67,8 +81,6 @@ jobs:
             -F "scan_type=Semgrep JSON Report" `
             -F "file=@semgrep.json" `
             -F "product_name=DevSecOps_Project" `
-            -F "product_type_name=Research and Development" `
             -F "engagement_name=GitHub Actions" `
             -F "test_title=Semgrep SAST Scan" `
-            -F "auto_create_context=true" `
-            -F "active=true"
+            -F "auto_create_context=true"
