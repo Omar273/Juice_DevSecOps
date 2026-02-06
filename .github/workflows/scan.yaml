@@ -7,25 +7,18 @@ on:
 
 jobs:
 # =========================
-# 1️⃣ BUILD JOB
+# 1️⃣ BUILD
 # =========================
   build:
-    name: Build
     runs-on: windows-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build step
-        run: |
-          echo "Building application..."
-          echo "Build completed"
+      - run: echo "Build OK"
 
 # =========================
-# 2️⃣ SAST SCAN (SEMGREP)
+# 2️⃣ SAST (SEMGREP)
 # =========================
   sast:
-    name: SAST - Semgrep
     needs: build
     runs-on: windows-latest
 
@@ -39,23 +32,21 @@ jobs:
       - name: Install Semgrep
         run: pip install semgrep
 
-      - name: Run Semgrep Scan
+      - name: Run Semgrep
         shell: powershell
         run: |
           semgrep scan --config=auto --json . | Out-File -Encoding utf8 semgrep.json
           exit 0
 
-      - name: Upload Semgrep Artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: semgrep-report
           path: semgrep.json
 
 # =========================
-# 3️⃣ DEFECTDOJO – CREATE CONTEXT
+# 3️⃣ DEFECTDOJO IMPORT (SINGLE STEP)
 # =========================
-  defectdojo-context:
-    name: DefectDojo - Create Product & Engagement
+  defectdojo:
     needs: sast
     runs-on: windows-latest
 
@@ -64,37 +55,11 @@ jobs:
       DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
 
     steps:
-      - name: Create Product & Engagement (context only)
-        shell: powershell
-        run: |
-          curl.exe -X POST "$env:DEFECTDOJO_URL/api/v2/import-scan/" `
-            -H "Authorization: Token $env:DEFECTDOJO_API_KEY" `
-            -F "scan_type=Semgrep JSON Report" `
-            -F "file=@NUL" `
-            -F "product_name=DevSecOps_Project" `
-            -F "engagement_name=GitHub Actions" `
-            -F "test_title=Context Init" `
-            -F "auto_create_context=true"
-
-# =========================
-# 4️⃣ DEFECTDOJO – UPLOAD SCAN
-# =========================
-  defectdojo-scan:
-    name: DefectDojo - Upload Scan
-    needs: defectdojo-context
-    runs-on: windows-latest
-
-    env:
-      DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
-      DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
-
-    steps:
-      - name: Download Semgrep Artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: semgrep-report
 
-      - name: Upload Semgrep Scan
+      - name: Upload Scan to DefectDojo
         shell: powershell
         run: |
           curl.exe -X POST "$env:DEFECTDOJO_URL/api/v2/import-scan/" `
@@ -102,8 +67,8 @@ jobs:
             -F "scan_type=Semgrep JSON Report" `
             -F "file=@semgrep.json" `
             -F "product_name=DevSecOps_Project" `
+            -F "product_type_name=Research and Development" `
             -F "engagement_name=GitHub Actions" `
             -F "test_title=Semgrep SAST Scan" `
             -F "auto_create_context=true" `
-            -F "active=true" `
-            -F "verified=false"
+            -F "active=true"
