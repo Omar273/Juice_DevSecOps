@@ -14,8 +14,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       
 
@@ -28,17 +27,14 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install Semgrep
-        run: |
-          pip install semgrep
+        run: pip install semgrep
 
       - name: Run Semgrep Scan
         shell: powershell
@@ -53,66 +49,58 @@ jobs:
           path: semgrep.json
 
 # =========================
-# 3️⃣ DEFECTDOJO IMPORT
+# 3️⃣ DEFECTDOJO – CREATE CONTEXT
 # =========================
-  defectdojo:
-    name: Upload to DefectDojo
+  defectdojo-context:
+    name: DefectDojo - Create Product & Engagement
     needs: sast
     runs-on: windows-latest
+
     env:
       DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
       DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+
+    steps:
+      - name: Create Product & Engagement (context only)
+        shell: powershell
+        run: |
+          curl.exe -X POST "$env:DEFECTDOJO_URL/api/v2/import-scan/" `
+            -H "Authorization: Token $env:DEFECTDOJO_API_KEY" `
+            -F "scan_type=Semgrep JSON Report" `
+            -F "file=@NUL" `
+            -F "product_name=DevSecOps_Project" `
+            -F "engagement_name=GitHub Actions" `
+            -F "test_title=Context Init" `
+            -F "auto_create_context=true"
+
+# =========================
+# 4️⃣ DEFECTDOJO – UPLOAD SCAN
+# =========================
+  defectdojo-scan:
+    name: DefectDojo - Upload Scan
+    needs: defectdojo-context
+    runs-on: windows-latest
+
+    env:
+      DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+      DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+
     steps:
       - name: Download Semgrep Artifact
         uses: actions/download-artifact@v4
         with:
           name: semgrep-report
-          path: ./reports
-      
-      - name: Debug - Check file
+
+      - name: Upload Semgrep Scan
         shell: powershell
         run: |
-          Write-Host "=== Files in reports folder ==="
-          Get-ChildItem -Path ./reports
-          Write-Host "`n=== Content preview ==="
-          Get-Content ./reports/semgrep.json | Select-Object -First 10
-          Write-Host "`n=== File size ==="
-          (Get-Item ./reports/semgrep.json).Length
-      
-      - name: Debug - Test API Connection
-        shell: powershell
-        run: |
-          Write-Host "=== Testing DefectDojo API ==="
-          $headers = @{
-            "Authorization" = "Token $env:DEFECTDOJO_API_KEY"
-          }
-          try {
-            $test = Invoke-RestMethod -Uri "$env:DEFECTDOJO_URL/api/v2/products/" -Headers $headers -Method Get
-            Write-Host "✅ API Connection OK"
-            Write-Host "Existing products:" 
-            $test.results | Select-Object -First 5 | Format-Table name, prod_type
-          } catch {
-            Write-Host "❌ API Connection Failed: $_"
-          }
-      
-      - name: Upload Scan to DefectDojo
-        shell: powershell
-        run: |
-          Write-Host "=== Uploading to DefectDojo ==="
-          
-          $response = curl.exe -X POST "$env:DEFECTDOJO_URL/api/v2/import-scan/" `
+          curl.exe -X POST "$env:DEFECTDOJO_URL/api/v2/import-scan/" `
             -H "Authorization: Token $env:DEFECTDOJO_API_KEY" `
             -F "scan_type=Semgrep JSON Report" `
-            -F "file=@./reports/semgrep.json" `
+            -F "file=@semgrep.json" `
             -F "product_name=DevSecOps_Project" `
-            -F "product_type_name=Research and Development" `
-            -F "engagement_name=GitHub Actions CI/CD" `
+            -F "engagement_name=GitHub Actions" `
             -F "test_title=Semgrep SAST Scan" `
             -F "auto_create_context=true" `
             -F "active=true" `
-            -F "verified=true" `
-            --write-out "\nHTTP_CODE:%{http_code}" `
-            --verbose
-          
-          Write-Host "`n=== Response ==="
-          Write-Host $response
+            -F "verified=false"
