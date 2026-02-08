@@ -83,6 +83,7 @@ jobs:
             -F "scan_type=Semgrep JSON Report" `
             -F "file=@./reports/semgrep.json" `
             -F "product_name=DevSecOps_Project" `
+            -F "product_type_name=Research and Development" `
             -F "engagement_name=GitHub Actions CI/CD" `
             -F "test_title=Semgrep SAST Scan" `
             -F "auto_create_context=true" `
