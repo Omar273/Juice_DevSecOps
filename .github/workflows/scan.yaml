@@ -62,7 +62,7 @@ jobs:
 # =========================
   defectdojo:
     name: Upload to DefectDojo
-    needs: sast
+    needs: dast
     runs-on: windows-latest
 
     env:
@@ -75,6 +75,12 @@ jobs:
         with:
           name: semgrep-report
 
+      - name: Download ZAP Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: zap-report
+
+      # -------- Semgrep Import --------
       - name: Upload Semgrep Scan to DefectDojo
         shell: powershell
         run: |
@@ -88,3 +94,22 @@ jobs:
             -F "auto_create_context=true" `
             -F "active=true" `
             -F "verified=false"
+
+      # -------- ZAP Import --------
+      - name: Upload ZAP Scan to DefectDojo
+        shell: powershell
+        run: |
+          curl.exe -X POST "$env:DEFECTDOJO_URL/api/v2/import-scan/" `
+            -H "Authorization: Token $env:DEFECTDOJO_API_KEY" `
+            -F "scan_type=ZAP Scan" `
+            -F "file=@zap-report.json" `
+            -F "product_name=DevSecOps_Project" `
+            -F "engagement_name=GitHub Actions" `
+            -F "test_title=OWASP ZAP DAST Scan" `
+            -F "auto_create_context=true" `
+            -F "active=true" `
+            -F "verified=false" 
+
+
+     
+    
