@@ -7,7 +7,7 @@ on:
 
 jobs:
 # =========================
-# 1️⃣ BUILD JOB
+# 1️⃣ BUILD
 # =========================
   build:
     name: Build
@@ -15,12 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build step
-        run: |
-          echo "Building application..."
-          echo "Build completed"
+        run: echo "Build completed"
 
 # =========================
-# 2️⃣ SAST SCAN (SEMGREP)
+# 2️⃣ SAST (SEMGREP)
 # =========================
   sast:
     name: SAST - Semgrep
@@ -33,17 +31,12 @@ jobs:
           python-version: "3.11"
       - name: Install Semgrep
         run: pip install semgrep
-
       - name: Run Semgrep Scan
         run: semgrep scan --config=p/ci --json . > semgrep.json || true
-        # `|| true` prevents pipeline failure on findings;
-        # remove it if you want the pipeline to fail on findings
-
       - name: Debug Semgrep Results
         run: |
           FINDINGS=$(python3 -c "import json; d=json.load(open('semgrep.json')); print(len(d.get('results', [])))")
           echo "Semgrep findings: $FINDINGS"
-
       - name: Upload Semgrep Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -51,7 +44,7 @@ jobs:
           path: semgrep.json
 
 # =========================
-# 3️⃣ DAST SCAN (ZAP)       ← THIS WAS MISSING
+# 3️⃣ DAST (ZAP)
 # =========================
   dast:
     name: DAST - OWASP ZAP
@@ -59,26 +52,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Run ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
           target: "https://your-target-app-url.com"
-          artifact_name: zap-report          # ← controls the artifact name uploaded by ZAP itself
           fail_action: false
-          allow_issue_writing: false          # avoids needing extra GitHub permissions
+          allow_issue_writing: false
+          artifact_name: ""                  # ← disables ZAP's built-in upload
 
-      # ZAP writes its JSON report to the workspace root as report_json.json
-      - name: Rename ZAP report for DefectDojo
-        run: |
-          ls -la                              # debug: see what ZAP actually created
-          cp report_json.json zap-report.json
+      - name: Debug ZAP output files
+        run: ls -la
 
       - name: Upload ZAP JSON Artifact
         uses: actions/upload-artifact@v4
         with:
           name: zap-report
-          path: zap-report.json
+          path: report_json.json
 
 # =========================
 # 4️⃣ DEFECTDOJO IMPORT
@@ -99,13 +88,12 @@ jobs:
       - name: Download ZAP Artifact
         uses: actions/download-artifact@v4
         with:
-          name: zap-report                   # ← matches the upload name above
+          name: zap-report
 
       - name: Debug downloaded files
-        run: ls -la                           # confirm both files exist before curl
+        run: ls -la
 
-      # -------- Semgrep Import --------
-      - name: Upload Semgrep Scan to DefectDojo
+      - name: Upload Semgrep to DefectDojo
         run: |
           curl -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DEFECTDOJO_API_KEY" \
@@ -118,13 +106,12 @@ jobs:
             -F "active=true" \
             -F "verified=false"
 
-      # -------- ZAP Import --------
-      - name: Upload ZAP Scan to DefectDojo
+      - name: Upload ZAP to DefectDojo
         run: |
           curl -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DEFECTDOJO_API_KEY" \
             -F "scan_type=ZAP Scan" \
-            -F "file=@zap-report.json" \
+            -F "file=@report_json.json" \
             -F "product_name=DevSecOps_Project" \
             -F "engagement_name=GitHub Actions" \
             -F "test_title=OWASP ZAP DAST Scan" \
