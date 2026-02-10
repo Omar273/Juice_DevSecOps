@@ -1,8 +1,8 @@
-name: DevSecOps Pipeline (Semgrep → DefectDojo DAG)
+name: DevSecOps Pipeline (Semgrep → ZAP → DefectDojo DAG)
 
 on:
   push:
-    branches: [ "main" ] 
+    branches: ["main"]
   pull_request:
 
 jobs:
@@ -11,11 +11,9 @@ jobs:
 # =========================
   build:
     name: Build
-    runs-on: windows-latest
-
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Build step
         run: |
           echo "Building application..."
@@ -27,29 +25,24 @@ jobs:
   sast:
     name: SAST - Semgrep
     needs: build
-    runs-on: windows-latest
-
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install Semgrep
         run: pip install semgrep
 
       - name: Run Semgrep Scan
-        shell: powershell
-        run: |
-          semgrep scan --config=p/ci --json . | Out-File -Encoding utf8 semgrep.json
-          exit 0
+        run: semgrep scan --config=p/ci --json . > semgrep.json || true
+        # `|| true` prevents pipeline failure on findings;
+        # remove it if you want the pipeline to fail on findings
 
       - name: Debug Semgrep Results
-        shell: powershell
         run: |
-          $json = Get-Content semgrep.json | ConvertFrom-Json
-          Write-Host "Semgrep findings:" $json.results.Count
+          FINDINGS=$(python3 -c "import json; d=json.load(open('semgrep.json')); print(len(d.get('results', [])))")
+          echo "Semgrep findings: $FINDINGS"
 
       - name: Upload Semgrep Artifact
         uses: actions/upload-artifact@v4
@@ -58,17 +51,38 @@ jobs:
           path: semgrep.json
 
 # =========================
-# 3️⃣ DEFECTDOJO IMPORT
+# 3️⃣ DAST SCAN (ZAP)       ← THIS WAS MISSING
+# =========================
+  dast:
+    name: DAST - OWASP ZAP
+    needs: sast
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: "https://your-target-app-url.com"   # 🔁 Replace this
+          report_json: zap-report.json
+          fail_action: false    # set true if you want pipeline to fail on findings
+
+      - name: Upload ZAP Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: zap-report.json
+
+# =========================
+# 4️⃣ DEFECTDOJO IMPORT
 # =========================
   defectdojo:
     name: Upload to DefectDojo
-    needs: dast
-    runs-on: windows-latest
-
+    needs: [sast, dast]    # ← waits for BOTH to finish
+    runs-on: ubuntu-latest
     env:
       DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
       DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
-
     steps:
       - name: Download Semgrep Artifact
         uses: actions/download-artifact@v4
@@ -82,34 +96,28 @@ jobs:
 
       # -------- Semgrep Import --------
       - name: Upload Semgrep Scan to DefectDojo
-        shell: powershell
         run: |
-          curl.exe -X POST "$env:DEFECTDOJO_URL/api/v2/import-scan/" `
-            -H "Authorization: Token $env:DEFECTDOJO_API_KEY" `
-            -F "scan_type=Semgrep JSON Report" `
-            -F "file=@semgrep.json" `
-            -F "product_name=DevSecOps_Project" `
-            -F "engagement_name=GitHub Actions" `
-            -F "test_title=Semgrep SAST Scan" `
-            -F "auto_create_context=true" `
-            -F "active=true" `
+          curl -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DEFECTDOJO_API_KEY" \
+            -F "scan_type=Semgrep JSON Report" \
+            -F "file=@semgrep.json" \
+            -F "product_name=DevSecOps_Project" \
+            -F "engagement_name=GitHub Actions" \
+            -F "test_title=Semgrep SAST Scan" \
+            -F "auto_create_context=true" \
+            -F "active=true" \
             -F "verified=false"
 
       # -------- ZAP Import --------
       - name: Upload ZAP Scan to DefectDojo
-        shell: powershell
         run: |
-          curl.exe -X POST "$env:DEFECTDOJO_URL/api/v2/import-scan/" `
-            -H "Authorization: Token $env:DEFECTDOJO_API_KEY" `
-            -F "scan_type=ZAP Scan" `
-            -F "file=@zap-report.json" `
-            -F "product_name=DevSecOps_Project" `
-            -F "engagement_name=GitHub Actions" `
-            -F "test_title=OWASP ZAP DAST Scan" `
-            -F "auto_create_context=true" `
-            -F "active=true" `
-            -F "verified=false" 
-
-
-     
-    
+          curl -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DEFECTDOJO_API_KEY" \
+            -F "scan_type=ZAP Scan" \
+            -F "file=@zap-report.json" \
+            -F "product_name=DevSecOps_Project" \
+            -F "engagement_name=GitHub Actions" \
+            -F "test_title=OWASP ZAP DAST Scan" \
+            -F "auto_create_context=true" \
+            -F "active=true" \
+            -F "verified=false"
