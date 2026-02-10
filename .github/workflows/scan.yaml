@@ -2,7 +2,7 @@ name: DevSecOps Pipeline (Semgrep → DefectDojo DAG)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main" ] 
   pull_request:
 
 jobs:
