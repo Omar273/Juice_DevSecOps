@@ -63,11 +63,18 @@ jobs:
       - name: Run ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
-          target: "https://your-target-app-url.com"   # 🔁 Replace this
-          report_json: zap-report.json
-          fail_action: false    # set true if you want pipeline to fail on findings
+          target: "https://your-target-app-url.com"
+          artifact_name: zap-report          # ← controls the artifact name uploaded by ZAP itself
+          fail_action: false
+          allow_issue_writing: false          # avoids needing extra GitHub permissions
 
-      - name: Upload ZAP Artifact
+      # ZAP writes its JSON report to the workspace root as report_json.json
+      - name: Rename ZAP report for DefectDojo
+        run: |
+          ls -la                              # debug: see what ZAP actually created
+          cp report_json.json zap-report.json
+
+      - name: Upload ZAP JSON Artifact
         uses: actions/upload-artifact@v4
         with:
           name: zap-report
@@ -78,7 +85,7 @@ jobs:
 # =========================
   defectdojo:
     name: Upload to DefectDojo
-    needs: [sast, dast]    # ← waits for BOTH to finish
+    needs: [sast, dast]
     runs-on: ubuntu-latest
     env:
       DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
@@ -92,7 +99,10 @@ jobs:
       - name: Download ZAP Artifact
         uses: actions/download-artifact@v4
         with:
-          name: zap-report
+          name: zap-report                   # ← matches the upload name above
+
+      - name: Debug downloaded files
+        run: ls -la                           # confirm both files exist before curl
 
       # -------- Semgrep Import --------
       - name: Upload Semgrep Scan to DefectDojo
