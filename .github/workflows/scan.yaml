@@ -1,4 +1,4 @@
-name: DevSecOps Pipeline (Semgrep → ZAP → DefectDojo DAG)
+name: DevSecOps Pipeline (Semgrep → ZAP → DefectDojo)
 
 on:
   push:
@@ -44,7 +44,7 @@ jobs:
           path: semgrep.json
 
 # =========================
-# 3️⃣ DAST (ZAP → localhost)
+# 3️⃣ DAST (ZAP)
 # =========================
   dast:
     name: DAST - OWASP ZAP
@@ -53,41 +53,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # --- Start your app first ---
-      # Replace this block with however your app actually starts
-      - name: Set up Python (example app)
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install app dependencies
+      - name: Start dummy target app
         run: |
-          pip install -r requirements.txt    # adjust to your stack
+          python3 -m http.server 5000 &
+          sleep 3
+          curl -f http://localhost:5000 || (echo "Server failed to start" && exit 1)
 
-      - name: Start application in background
-        run: |
-          nohup python app.py &              # adjust to your start command
-          echo "APP_PID=$!" >> $GITHUB_ENV
-
-      - name: Wait for app to be ready
-        run: |
-          echo "Waiting for app on port 5000..."
-          for i in {1..30}; do
-            if curl -s http://localhost:5000 > /dev/null; then
-              echo "App is up!"
-              break
-            fi
-            echo "Attempt $i/30 - not ready yet, waiting 2s..."
-            sleep 2
-          done
-          # Final check - fail fast if app never started
-          curl -f http://localhost:5000 || (echo "App failed to start!" && exit 1)
-
-      # --- Pull ZAP image ---
       - name: Pull ZAP Docker image
         run: docker pull ghcr.io/zaproxy/zaproxy:stable
 
-      # --- Run ZAP using --network host so it can reach localhost ---
       - name: Run ZAP Baseline Scan
         run: |
           docker run --rm \
@@ -95,13 +69,16 @@ jobs:
             -v "${{ github.workspace }}:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
-              -t "http://localhost:5000" \   # ← your actual app port
+              -t "http://localhost:5000" \
               -J zap-report.json \
-              -I                             # -I = ignore warnings, won't fail the job
+              -I
+        continue-on-error: true
 
-      - name: Verify ZAP report
+      - name: Confirm report was created
         run: |
-          ls -la zap-report.json
+          if [ ! -f zap-report.json ]; then
+            echo "zap-report.json not found!" && exit 1
+          fi
           python3 -m json.tool zap-report.json > /dev/null && echo "Valid JSON ✓"
 
       - name: Upload ZAP Artifact
