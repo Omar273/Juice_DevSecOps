@@ -44,7 +44,7 @@ jobs:
           path: semgrep.json
 
 # =========================
-# 3️⃣ DAST (ZAP)
+# 3️⃣ DAST (ZAP → localhost)
 # =========================
   dast:
     name: DAST - OWASP ZAP
@@ -52,22 +52,63 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.12.0
+
+      # --- Start your app first ---
+      # Replace this block with however your app actually starts
+      - name: Set up Python (example app)
+        uses: actions/setup-python@v5
         with:
-          target: "https://your-target-app-url.com"
-          fail_action: false
-          allow_issue_writing: false
-          artifact_name: ""                  # ← disables ZAP's built-in upload
+          python-version: "3.11"
 
-      - name: Debug ZAP output files
-        run: ls -la
+      - name: Install app dependencies
+        run: |
+          pip install -r requirements.txt    # adjust to your stack
 
-      - name: Upload ZAP JSON Artifact
+      - name: Start application in background
+        run: |
+          nohup python app.py &              # adjust to your start command
+          echo "APP_PID=$!" >> $GITHUB_ENV
+
+      - name: Wait for app to be ready
+        run: |
+          echo "Waiting for app on port 5000..."
+          for i in {1..30}; do
+            if curl -s http://localhost:5000 > /dev/null; then
+              echo "App is up!"
+              break
+            fi
+            echo "Attempt $i/30 - not ready yet, waiting 2s..."
+            sleep 2
+          done
+          # Final check - fail fast if app never started
+          curl -f http://localhost:5000 || (echo "App failed to start!" && exit 1)
+
+      # --- Pull ZAP image ---
+      - name: Pull ZAP Docker image
+        run: docker pull ghcr.io/zaproxy/zaproxy:stable
+
+      # --- Run ZAP using --network host so it can reach localhost ---
+      - name: Run ZAP Baseline Scan
+        run: |
+          docker run --rm \
+            --network host \
+            -v "${{ github.workspace }}:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+              -t "http://localhost:5000" \   # ← your actual app port
+              -J zap-report.json \
+              -I                             # -I = ignore warnings, won't fail the job
+
+      - name: Verify ZAP report
+        run: |
+          ls -la zap-report.json
+          python3 -m json.tool zap-report.json > /dev/null && echo "Valid JSON ✓"
+
+      - name: Upload ZAP Artifact
         uses: actions/upload-artifact@v4
         with:
           name: zap-report
-          path: report_json.json
+          path: zap-report.json
 
 # =========================
 # 4️⃣ DEFECTDOJO IMPORT
@@ -111,7 +152,7 @@ jobs:
           curl -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DEFECTDOJO_API_KEY" \
             -F "scan_type=ZAP Scan" \
-            -F "file=@report_json.json" \
+            -F "file=@zap-report.json" \
             -F "product_name=DevSecOps_Project" \
             -F "engagement_name=GitHub Actions" \
             -F "test_title=OWASP ZAP DAST Scan" \
