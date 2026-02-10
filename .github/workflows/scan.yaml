@@ -62,10 +62,14 @@ jobs:
       - name: Pull ZAP Docker image
         run: docker pull ghcr.io/zaproxy/zaproxy:stable
 
+      - name: Fix workspace permissions for ZAP
+        run: chmod 777 "${{ github.workspace }}"
+
       - name: Run ZAP Baseline Scan
         run: |
           docker run --rm \
             --network host \
+            -u root \
             -v "${{ github.workspace }}:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
