@@ -9,7 +9,7 @@ env:
   JUICE_SHOP_IMAGE: bkimminich/juice-shop
   JUICE_SHOP_PORT: 3000
   ZAP_USER_EMAIL: testuser@example.com
-  ZAP_USER_PASSWORD: Test123!
+  ZAP_USER_PASSWORD: Test123! 
 
 jobs:
 # =========================
