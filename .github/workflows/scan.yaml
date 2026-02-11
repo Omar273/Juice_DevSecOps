@@ -50,7 +50,7 @@ jobs:
           path: semgrep.json
 
 # =========================
-# 3️⃣ DAST (ZAP) - XML FORMAT
+# 3️⃣ DAST (ZAP) - MAXIMUM FINDINGS
 # =========================
   dast:
     name: DAST - OWASP ZAP
@@ -97,30 +97,110 @@ jobs:
       - name: Fix workspace permissions for ZAP
         run: chmod -R 777 "${{ github.workspace }}"
 
-      - name: Run ZAP Full Authenticated Scan (Unlimited)
+      - name: Start ZAP Daemon
         run: |
-          docker run --rm \
+          docker run -d \
+            --name zap \
             --user root \
             --network zap-net \
             -v "${{ github.workspace }}:/zap/wrk:rw" \
+            -p 8080:8080 \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-full-scan.py \
-              -t "http://juice-shop:3000" \
-              -x zap-report.xml \
-              -r zap-report.html \
-              -a \
-              -j \
-              -z "-config auth.method=form \
-                  -config auth.loginurl=http://juice-shop:3000/rest/user/login \
-                  -config auth.loginbody=email=${{ env.ZAP_USER_EMAIL }}&password=${{ env.ZAP_USER_PASSWORD }} \
-                  -config auth.loggedinindicator=Logout" || true
+            zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.disablekey=true
+
+      - name: Wait for ZAP to start
+        run: |
+          echo "Waiting for ZAP to be ready..."
+          for i in {1..30}; do
+            if curl -f http://localhost:8080 > /dev/null 2>&1; then
+              echo "ZAP is ready!"
+              break
+            fi
+            echo "Attempt $i: ZAP not ready yet..."
+            sleep 2
+          done
+
+      - name: Configure ZAP and Run Full Scan
+        run: |
+          echo "=== Opening target URL ==="
+          curl "http://localhost:8080/JSON/core/action/accessUrl/?url=http://juice-shop:3000"
+          sleep 2
+          
+          echo "=== Running Spider (Traditional) ==="
+          SPIDER_ID=$(curl -s "http://localhost:8080/JSON/spider/action/scan/?url=http://juice-shop:3000&maxChildren=100&recurse=true&subtreeOnly=false" | jq -r '.scan')
+          echo "Spider scan ID: $SPIDER_ID"
+          
+          # Wait for spider to complete
+          while true; do
+            STATUS=$(curl -s "http://localhost:8080/JSON/spider/view/status/?scanId=$SPIDER_ID" | jq -r '.status')
+            echo "Spider progress: $STATUS%"
+            if [ "$STATUS" = "100" ]; then
+              break
+            fi
+            sleep 5
+          done
+          
+          echo "=== Running AJAX Spider ==="
+          curl "http://localhost:8080/JSON/ajaxSpider/action/scan/?url=http://juice-shop:3000&inScope=true"
+          sleep 2
+          
+          # Wait for AJAX spider
+          while true; do
+            STATUS=$(curl -s "http://localhost:8080/JSON/ajaxSpider/view/status/" | jq -r '.status')
+            echo "AJAX Spider status: $STATUS"
+            if [ "$STATUS" = "stopped" ]; then
+              break
+            fi
+            sleep 5
+          done
+          
+          echo "=== Waiting for Passive Scan ==="
+          sleep 10
+          while true; do
+            REMAINING=$(curl -s "http://localhost:8080/JSON/pscan/view/recordsToScan/" | jq -r '.recordsToScan')
+            echo "Passive scan records remaining: $REMAINING"
+            if [ "$REMAINING" = "0" ]; then
+              break
+            fi
+            sleep 5
+          done
+          
+          echo "=== Running Active Scan with ALL Policies ==="
+          ASCAN_ID=$(curl -s "http://localhost:8080/JSON/ascan/action/scan/?url=http://juice-shop:3000&recurse=true&inScopeOnly=false&scanPolicyName=&method=&postData=" | jq -r '.scan')
+          echo "Active scan ID: $ASCAN_ID"
+          
+          # Wait for active scan to complete
+          while true; do
+            STATUS=$(curl -s "http://localhost:8080/JSON/ascan/view/status/?scanId=$ASCAN_ID" | jq -r '.status')
+            echo "Active scan progress: $STATUS%"
+            if [ "$STATUS" = "100" ]; then
+              break
+            fi
+            sleep 10
+          done
+          
+          echo "=== Scan Complete! ==="
+          sleep 5
         timeout-minutes: 60
+
+      - name: Get Alert Count
+        run: |
+          ALERT_COUNT=$(curl -s "http://localhost:8080/JSON/core/view/numberOfAlerts/" | jq -r '.numberOfAlerts')
+          echo "🎯 Total findings: $ALERT_COUNT"
+
+      - name: Generate Reports
+        run: |
+          echo "Generating XML report..."
+          curl -s "http://localhost:8080/OTHER/core/other/xmlreport/" -o zap-report.xml
+          
+          echo "Generating HTML report..."
+          curl -s "http://localhost:8080/OTHER/core/other/htmlreport/" -o zap-report.html
+          
+          echo "Reports generated!"
+          ls -lah zap-report.*
 
       - name: Verify ZAP Reports
         run: |
-          echo "Checking for report files..."
-          ls -lah "${{ github.workspace }}"
-          
           if [ ! -f zap-report.xml ]; then
             echo "⚠️ zap-report.xml not found!"
             exit 1
@@ -149,6 +229,8 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
+          docker stop zap || true
+          docker rm zap || true
           docker stop juice-shop || true
           docker rm juice-shop || true
           docker network rm zap-net || true
