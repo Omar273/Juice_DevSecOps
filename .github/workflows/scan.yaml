@@ -85,21 +85,65 @@ jobs:
       - name: Fix workspace permissions
         run: chmod -R 777 "$(pwd)"
 
-      - name: Run OWASP ZAP Full Scan (Maximum Coverage)
+      - name: Create ZAP Automation Plan
+        run: |
+          cat > automation.yaml << 'EOF'
+          env:
+            contexts:
+              - name: Juice Shop
+                urls:
+                  - http://juice-shop:3000
+                includePaths:
+                  - "http://juice-shop:3000.*"
+            parameters:
+              failOnError: true
+              failOnWarning: false
+              progressToStdout: true
+          jobs:
+            - type: spider
+              parameters:
+                url: http://juice-shop:3000
+                maxDuration: 0
+                maxDepth: 0
+                maxChildren: 0
+            - type: spiderAjax
+              parameters:
+                url: http://juice-shop:3000
+                maxDuration: 0
+                maxCrawlDepth: 0
+                numberOfBrowsers: 4
+            - type: passiveScan-wait
+              parameters:
+                maxDuration: 0
+            - type: activeScan
+              parameters:
+                context: Juice Shop
+                policy: Default Policy
+                maxRuleDurationInMins: 0
+                maxScanDurationInMins: 0
+                threadPerHost: 10
+                delayInMs: 0
+            - type: report
+              parameters:
+                template: traditional-xml
+                reportDir: /zap/wrk
+                reportFile: zap.xml
+            - type: report
+              parameters:
+                template: traditional-html
+                reportDir: /zap/wrk
+                reportFile: zap.html
+          EOF
+
+      - name: Run OWASP ZAP Full Scan (Automation Framework)
         run: |
           docker run --rm \
             --user root \
             --network zap-net \
             -v $(pwd):/zap/wrk \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-full-scan.py \
-            -t http://juice-shop:3000 \
-            -g gen.conf \
-            -x zap.xml \
-            -r zap.html \
-            -a \
-            -j \
-            -d || true
+            zap.sh -cmd -autorun /zap/wrk/automation.yaml || true
+        timeout-minutes: 90
 
       - name: Upload ZAP HTML Report 
         uses: actions/upload-artifact@v4
