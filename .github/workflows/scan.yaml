@@ -50,7 +50,7 @@ jobs:
           path: semgrep.json
 
 # =========================
-# 3️⃣ DAST (ZAP) - IMPROVED
+# 3️⃣ DAST (ZAP) - XML FORMAT
 # =========================
   dast:
     name: DAST - OWASP ZAP
@@ -106,7 +106,7 @@ jobs:
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
               -t "http://juice-shop:3000" \
-              -J zap-report.json \
+              -x zap-report.xml \
               -r zap-report.html \
               -I \
               -z "-config auth.method=form \
@@ -120,23 +120,23 @@ jobs:
           echo "Checking for report files..."
           ls -lah "${{ github.workspace }}"
           
-          if [ ! -f zap-report.json ]; then
-            echo "⚠️ zap-report.json not found!"
+          if [ ! -f zap-report.xml ]; then
+            echo "⚠️ zap-report.xml not found!"
             exit 1
           fi
           
-          echo "Validating JSON format..."
-          python3 -m json.tool zap-report.json > /dev/null && echo "✅ Valid JSON"
+          echo "✅ XML report generated"
+          echo "File size: $(du -h zap-report.xml)"
           
           if [ -f zap-report.html ]; then
             echo "✅ HTML report also generated"
           fi
 
-      - name: Upload ZAP JSON Report
+      - name: Upload ZAP XML Report
         uses: actions/upload-artifact@v4
         with:
           name: zap-report
-          path: zap-report.json
+          path: zap-report.xml
 
       - name: Upload ZAP HTML Report
         uses: actions/upload-artifact@v4
@@ -180,7 +180,7 @@ jobs:
           echo "Semgrep file size:"
           du -h semgrep.json
           echo "ZAP file size:"
-          du -h zap-report.json
+          du -h zap-report.xml
 
       - name: Upload Semgrep to DefectDojo
         run: |
@@ -213,7 +213,7 @@ jobs:
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DEFECTDOJO_API_KEY" \
             -F "scan_type=ZAP Scan" \
-            -F "file=@zap-report.json" \
+            -F "file=@zap-report.xml" \
             -F "product_name=DevSecOps_Project" \
             -F "engagement_name=GitHub Actions" \
             -F "test_title=OWASP ZAP DAST Scan" \
