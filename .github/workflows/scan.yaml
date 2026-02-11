@@ -9,7 +9,7 @@ env:
   JUICE_SHOP_IMAGE: bkimminich/juice-shop
   JUICE_SHOP_PORT: 3000
   ZAP_USER_EMAIL: testuser@example.com
-  ZAP_USER_PASSWORD: Test123! 
+  ZAP_USER_PASSWORD: Test123!
 
 jobs:
 # =========================
@@ -97,23 +97,22 @@ jobs:
       - name: Fix workspace permissions for ZAP
         run: chmod -R 777 "${{ github.workspace }}"
 
-      - name: Run ZAP Authenticated Scan
+      - name: Run ZAP Full Authenticated Scan
         run: |
           docker run --rm \
             --user root \
             --network zap-net \
             -v "${{ github.workspace }}:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py \
+            zap-full-scan.py \
               -t "http://juice-shop:3000" \
               -x zap-report.xml \
               -r zap-report.html \
-              -I \
+              -a \
               -z "-config auth.method=form \
                   -config auth.loginurl=http://juice-shop:3000/rest/user/login \
                   -config auth.loginbody=email=${{ env.ZAP_USER_EMAIL }}&password=${{ env.ZAP_USER_PASSWORD }} \
-                  -config auth.loggedinindicator=Logout"
-        continue-on-error: true
+                  -config auth.loggedinindicator=Logout" || true
 
       - name: Verify ZAP Reports
         run: |
