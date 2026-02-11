@@ -71,7 +71,7 @@ jobs:
             ${{ env.JUICE_SHOP_IMAGE }}
 
       - name: Wait for Juice Shop to start
-        run: sleep 40
+        run: sleep 60
 
       - name: Create Juice Shop User
         run: |
@@ -85,7 +85,7 @@ jobs:
       - name: Fix workspace permissions
         run: chmod -R 777 "$(pwd)"
 
-      - name: Run OWASP ZAP Full Scan (Authenticated)
+      - name: Run OWASP ZAP Full Scan (Maximum Coverage)
         run: |
           docker run --rm \
             --user root \
@@ -94,15 +94,12 @@ jobs:
             ghcr.io/zaproxy/zaproxy:stable \
             zap-full-scan.py \
             -t http://juice-shop:3000 \
-            -a \
+            -g gen.conf \
             -x zap.xml \
             -r zap.html \
-            -z "
-              -config auth.method=form
-              -config auth.loginurl=http://juice-shop:3000/rest/user/login
-              -config auth.loginbody=email=${{ env.ZAP_USER_EMAIL }}&password=${{ env.ZAP_USER_PASSWORD }}
-              -config auth.loggedinindicator=Logout
-            " || true
+            -a \
+            -j \
+            -d || true
 
       - name: Upload ZAP HTML Report 
         uses: actions/upload-artifact@v4
