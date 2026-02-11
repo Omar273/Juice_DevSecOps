@@ -5,6 +5,12 @@ on:
     branches: ["main"]
   pull_request:
 
+env:
+  JUICE_SHOP_IMAGE: bkimminich/juice-shop
+  JUICE_SHOP_PORT: 3000
+  ZAP_USER_EMAIL: testuser@example.com
+  ZAP_USER_PASSWORD: Test123!
+
 jobs:
 # =========================
 # 1️⃣ BUILD
@@ -44,7 +50,7 @@ jobs:
           path: semgrep.json
 
 # =========================
-# 3️⃣ DAST (ZAP)
+# 3️⃣ DAST (ZAP) - IMPROVED
 # =========================
   dast:
     name: DAST - OWASP ZAP
@@ -53,43 +59,98 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start dummy target app
-        run: |
-          python3 -m http.server 5000 &
-          sleep 3
-          curl -f http://localhost:5000 || (echo "Server failed to start" && exit 1)
+      - name: Create Docker network
+        run: docker network create zap-net
 
       - name: Pull ZAP Docker image
         run: docker pull ghcr.io/zaproxy/zaproxy:stable
 
-      - name: Fix workspace permissions for ZAP
-        run: chmod 777 "${{ github.workspace }}"
+      - name: Run OWASP Juice Shop
+        run: |
+          docker run -d \
+            --name juice-shop \
+            --network zap-net \
+            -p ${{ env.JUICE_SHOP_PORT }}:3000 \
+            ${{ env.JUICE_SHOP_IMAGE }}
 
-      - name: Run ZAP Baseline Scan
+      - name: Wait for Juice Shop to start
+        run: |
+          echo "Waiting for Juice Shop to be ready..."
+          for i in {1..30}; do
+            if curl -f http://localhost:${{ env.JUICE_SHOP_PORT }} > /dev/null 2>&1; then
+              echo "Juice Shop is ready!"
+              break
+            fi
+            echo "Attempt $i: Juice Shop not ready yet..."
+            sleep 2
+          done
+
+      - name: Create Juice Shop User
+        run: |
+          curl -s -X POST http://localhost:${{ env.JUICE_SHOP_PORT }}/api/Users \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"email\": \"${{ env.ZAP_USER_EMAIL }}\",
+              \"password\": \"${{ env.ZAP_USER_PASSWORD }}\"
+            }" || echo "User creation attempted (may already exist)"
+
+      - name: Fix workspace permissions for ZAP
+        run: chmod -R 777 "${{ github.workspace }}"
+
+      - name: Run ZAP Authenticated Scan
         run: |
           docker run --rm \
-            --network host \
-            -u root \
+            --user root \
+            --network zap-net \
             -v "${{ github.workspace }}:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
-              -t "http://localhost:5000" \
+              -t "http://juice-shop:3000" \
               -J zap-report.json \
-              -I
+              -r zap-report.html \
+              -I \
+              -z "-config auth.method=form \
+                  -config auth.loginurl=http://juice-shop:3000/rest/user/login \
+                  -config auth.loginbody=email=${{ env.ZAP_USER_EMAIL }}&password=${{ env.ZAP_USER_PASSWORD }} \
+                  -config auth.loggedinindicator=Logout"
         continue-on-error: true
 
-      - name: Confirm report was created
+      - name: Verify ZAP Reports
         run: |
+          echo "Checking for report files..."
+          ls -lah "${{ github.workspace }}"
+          
           if [ ! -f zap-report.json ]; then
-            echo "zap-report.json not found!" && exit 1
+            echo "⚠️ zap-report.json not found!"
+            exit 1
           fi
-          python3 -m json.tool zap-report.json > /dev/null && echo "Valid JSON ✓"
+          
+          echo "Validating JSON format..."
+          python3 -m json.tool zap-report.json > /dev/null && echo "✅ Valid JSON"
+          
+          if [ -f zap-report.html ]; then
+            echo "✅ HTML report also generated"
+          fi
 
-      - name: Upload ZAP Artifact
+      - name: Upload ZAP JSON Report
         uses: actions/upload-artifact@v4
         with:
           name: zap-report
           path: zap-report.json
+
+      - name: Upload ZAP HTML Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-html-report
+          path: zap-report.html
+        if: always()
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop juice-shop || true
+          docker rm juice-shop || true
+          docker network rm zap-net || true
 
 # =========================
 # 4️⃣ DEFECTDOJO IMPORT
@@ -113,11 +174,17 @@ jobs:
           name: zap-report
 
       - name: Debug downloaded files
-        run: ls -la
+        run: |
+          echo "Files in workspace:"
+          ls -lah
+          echo "Semgrep file size:"
+          du -h semgrep.json
+          echo "ZAP file size:"
+          du -h zap-report.json
 
       - name: Upload Semgrep to DefectDojo
         run: |
-          curl -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DEFECTDOJO_API_KEY" \
             -F "scan_type=Semgrep JSON Report" \
             -F "file=@semgrep.json" \
@@ -126,11 +193,24 @@ jobs:
             -F "test_title=Semgrep SAST Scan" \
             -F "auto_create_context=true" \
             -F "active=true" \
-            -F "verified=false"
+            -F "verified=false")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+          
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "✅ Semgrep upload successful"
+          else
+            echo "❌ Semgrep upload failed"
+            exit 1
+          fi
 
       - name: Upload ZAP to DefectDojo
         run: |
-          curl -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DEFECTDOJO_API_KEY" \
             -F "scan_type=ZAP Scan" \
             -F "file=@zap-report.json" \
@@ -139,4 +219,17 @@ jobs:
             -F "test_title=OWASP ZAP DAST Scan" \
             -F "auto_create_context=true" \
             -F "active=true" \
-            -F "verified=false"
+            -F "verified=false")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+          
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "✅ ZAP upload successful"
+          else
+            echo "❌ ZAP upload failed"
+            exit 1
+          fi
