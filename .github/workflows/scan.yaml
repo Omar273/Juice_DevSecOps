@@ -85,91 +85,127 @@ jobs:
       - name: Fix workspace permissions
         run: chmod -R 777 "$(pwd)"
 
-      - name: Create ZAP Automation Plan
+      - name: Create URL Seed File
         run: |
-          cat > automation.yaml << 'EOF'
-          env:
-            contexts:
-              - name: Juice Shop
-                urls:
-                  - http://juice-shop:3000
-                includePaths:
-                  - "http://juice-shop:3000.*"
-            parameters:
-              failOnError: true
-              failOnWarning: false
-              progressToStdout: true
-          jobs:
-            - type: requestor
-              requests:
-                - url: http://juice-shop:3000/
-                - url: http://juice-shop:3000/#/
-                - url: http://juice-shop:3000/#/search
-                - url: http://juice-shop:3000/#/login
-                - url: http://juice-shop:3000/#/register
-                - url: http://juice-shop:3000/#/basket
-                - url: http://juice-shop:3000/#/contact
-                - url: http://juice-shop:3000/#/about
-                - url: http://juice-shop:3000/#/administration
-                - url: http://juice-shop:3000/api/Users
-                - url: http://juice-shop:3000/api/Products
-                - url: http://juice-shop:3000/api/Challenges
-                - url: http://juice-shop:3000/api/Feedbacks
-                - url: http://juice-shop:3000/api/BasketItems
-                - url: http://juice-shop:3000/api/Quantitys
-                - url: http://juice-shop:3000/rest/user/login
-                - url: http://juice-shop:3000/rest/user/whoami
-                - url: http://juice-shop:3000/rest/products/search
-                - url: http://juice-shop:3000/rest/basket/1
-                - url: http://juice-shop:3000/rest/saveLoginIp
-                - url: http://juice-shop:3000/rest/continue-code
-                - url: http://juice-shop:3000/ftp
-                - url: http://juice-shop:3000/assets
-                - url: http://juice-shop:3000/redirect
-            - type: spider
-              parameters:
-                url: http://juice-shop:3000
-                maxDuration: 15
-                maxDepth: 10
-                maxChildren: 0
-            - type: spiderAjax
-              parameters:
-                url: http://juice-shop:3000
-                maxDuration: 20
-                maxCrawlDepth: 10
-                numberOfBrowsers: 1
-            - type: passiveScan-wait
-              parameters:
-                maxDuration: 5
-            - type: activeScan
-              parameters:
-                context: Juice Shop
-                policy: Default Policy
-                maxRuleDurationInMins: 3
-                maxScanDurationInMins: 80
-                maxAlertsPerRule: 10
-                threadPerHost: 10
-                delayInMs: 0
-            - type: report
-              parameters:
-                template: traditional-xml
-                reportDir: /zap/wrk
-                reportFile: zap.xml
-            - type: report
-              parameters:
-                template: traditional-html
-                reportDir: /zap/wrk
-                reportFile: zap.html
+          cat > urls.txt << 'EOF'
+          http://juice-shop:3000/
+          http://juice-shop:3000/#/
+          http://juice-shop:3000/#/search
+          http://juice-shop:3000/#/login
+          http://juice-shop:3000/#/register
+          http://juice-shop:3000/#/basket
+          http://juice-shop:3000/#/contact
+          http://juice-shop:3000/#/administration
+          http://juice-shop:3000/api/Users
+          http://juice-shop:3000/api/Products
+          http://juice-shop:3000/api/Challenges
+          http://juice-shop:3000/api/Feedbacks
+          http://juice-shop:3000/api/BasketItems
+          http://juice-shop:3000/rest/user/login
+          http://juice-shop:3000/rest/user/whoami
+          http://juice-shop:3000/rest/products/search
+          http://juice-shop:3000/rest/basket/1
+          http://juice-shop:3000/ftp
+          http://juice-shop:3000/assets
           EOF
 
-      - name: Run OWASP ZAP Full Scan (Automation Framework)
+      - name: Run OWASP ZAP Full Scan with API Control
         run: |
           docker run --rm \
             --user root \
             --network zap-net \
             -v $(pwd):/zap/wrk \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap.sh -cmd -autorun /zap/wrk/automation.yaml || true
+            bash -c "
+              # Start ZAP daemon
+              zap.sh -daemon -host 0.0.0.0 -port 8080 \
+                -config api.disablekey=true \
+                -config api.addrs.addr.name=.* \
+                -config api.addrs.addr.regex=true &
+              
+              sleep 15
+              
+              echo '=== Accessing seed URLs ==='
+              while read url; do
+                curl -s \"http://localhost:8080/JSON/core/action/accessUrl/?url=\$url\" > /dev/null
+                echo \"Accessed: \$url\"
+              done < /zap/wrk/urls.txt
+              
+              sleep 5
+              
+              echo '=== Running Traditional Spider ==='
+              SPIDER_SCAN_ID=\$(curl -s 'http://localhost:8080/JSON/spider/action/scan/?url=http://juice-shop:3000&maxChildren=0&recurse=true' | jq -r '.scan')
+              echo \"Spider ID: \$SPIDER_SCAN_ID\"
+              
+              # Wait for spider
+              while true; do
+                STATUS=\$(curl -s \"http://localhost:8080/JSON/spider/view/status/?scanId=\$SPIDER_SCAN_ID\" | jq -r '.status')
+                echo \"Spider: \$STATUS%\"
+                [ \"\$STATUS\" = \"100\" ] && break
+                sleep 5
+              done
+              
+              echo '=== Running AJAX Spider ==='
+              curl -s 'http://localhost:8080/JSON/ajaxSpider/action/scan/?url=http://juice-shop:3000' > /dev/null
+              sleep 10
+              
+              # Wait for AJAX spider
+              AJAX_TIMEOUT=0
+              while [ \$AJAX_TIMEOUT -lt 600 ]; do
+                STATUS=\$(curl -s 'http://localhost:8080/JSON/ajaxSpider/view/status/' | jq -r '.status')
+                echo \"AJAX Spider: \$STATUS\"
+                [ \"\$STATUS\" = \"stopped\" ] && break
+                sleep 5
+                AJAX_TIMEOUT=\$((AJAX_TIMEOUT + 5))
+              done
+              
+              URLS=\$(curl -s 'http://localhost:8080/JSON/core/view/numberOfMessages/' | jq -r '.numberOfMessages')
+              echo \"Total URLs discovered: \$URLS\"
+              
+              echo '=== Waiting for Passive Scan ==='
+              sleep 10
+              while true; do
+                REMAINING=\$(curl -s 'http://localhost:8080/JSON/pscan/view/recordsToScan/' | jq -r '.recordsToScan')
+                echo \"Passive scan remaining: \$REMAINING\"
+                [ \"\$REMAINING\" = \"0\" ] && break
+                sleep 5
+              done
+              
+              PASSIVE_ALERTS=\$(curl -s 'http://localhost:8080/JSON/core/view/numberOfAlerts/' | jq -r '.numberOfAlerts')
+              echo \"Alerts after passive scan: \$PASSIVE_ALERTS\"
+              
+              echo '=== Enabling ALL Active Scanners ==='
+              curl -s 'http://localhost:8080/JSON/ascan/action/enableAllScanners/' > /dev/null
+              curl -s 'http://localhost:8080/JSON/ascan/action/setOptionAttackStrength/?String=INSANE' > /dev/null
+              curl -s 'http://localhost:8080/JSON/ascan/action/setOptionAlertThreshold/?String=LOW' > /dev/null
+              curl -s 'http://localhost:8080/JSON/ascan/action/setOptionThreadPerHost/?Integer=10' > /dev/null
+              curl -s 'http://localhost:8080/JSON/ascan/action/setOptionMaxAlertsPerRule/?Integer=10' > /dev/null
+              
+              echo '=== Running Active Scan ==='
+              ASCAN_ID=\$(curl -s 'http://localhost:8080/JSON/ascan/action/scan/?url=http://juice-shop:3000&recurse=true&inScopeOnly=false' | jq -r '.scan')
+              echo \"Active Scan ID: \$ASCAN_ID\"
+              
+              # Wait for active scan with timeout
+              ASCAN_TIMEOUT=0
+              while [ \$ASCAN_TIMEOUT -lt 5400 ]; do
+                STATUS=\$(curl -s \"http://localhost:8080/JSON/ascan/view/status/?scanId=\$ASCAN_ID\" | jq -r '.status')
+                ALERTS=\$(curl -s 'http://localhost:8080/JSON/core/view/numberOfAlerts/' | jq -r '.numberOfAlerts')
+                echo \"Active scan: \$STATUS% | Alerts: \$ALERTS\"
+                [ \"\$STATUS\" = \"100\" ] && break
+                sleep 10
+                ASCAN_TIMEOUT=\$((ASCAN_TIMEOUT + 10))
+              done
+              
+              echo '=== Final Results ==='
+              FINAL_ALERTS=\$(curl -s 'http://localhost:8080/JSON/core/view/numberOfAlerts/' | jq -r '.numberOfAlerts')
+              echo \"🎯 TOTAL FINDINGS: \$FINAL_ALERTS\"
+              
+              echo '=== Generating Reports ==='
+              curl -s 'http://localhost:8080/OTHER/core/other/xmlreport/' -o /zap/wrk/zap.xml
+              curl -s 'http://localhost:8080/OTHER/core/other/htmlreport/' -o /zap/wrk/zap.html
+              
+              echo 'Scan complete!'
+            "
         timeout-minutes: 120
 
       - name: Upload ZAP HTML Report 
