@@ -3,7 +3,7 @@ name: DevSecOps Pipeline (Semgrep → ZAP → DefectDojo)
 on:
   push:
     branches: ["main"]
-  pull_request: 
+  pull_request:
 
 env:
   JUICE_SHOP_IMAGE: bkimminich/juice-shop
@@ -100,27 +100,53 @@ jobs:
               failOnWarning: false
               progressToStdout: true
           jobs:
+            - type: requestor
+              requests:
+                - url: http://juice-shop:3000/
+                - url: http://juice-shop:3000/#/
+                - url: http://juice-shop:3000/#/search
+                - url: http://juice-shop:3000/#/login
+                - url: http://juice-shop:3000/#/register
+                - url: http://juice-shop:3000/#/basket
+                - url: http://juice-shop:3000/#/contact
+                - url: http://juice-shop:3000/#/about
+                - url: http://juice-shop:3000/#/administration
+                - url: http://juice-shop:3000/api/Users
+                - url: http://juice-shop:3000/api/Products
+                - url: http://juice-shop:3000/api/Challenges
+                - url: http://juice-shop:3000/api/Feedbacks
+                - url: http://juice-shop:3000/api/BasketItems
+                - url: http://juice-shop:3000/api/Quantitys
+                - url: http://juice-shop:3000/rest/user/login
+                - url: http://juice-shop:3000/rest/user/whoami
+                - url: http://juice-shop:3000/rest/products/search
+                - url: http://juice-shop:3000/rest/basket/1
+                - url: http://juice-shop:3000/rest/saveLoginIp
+                - url: http://juice-shop:3000/rest/continue-code
+                - url: http://juice-shop:3000/ftp
+                - url: http://juice-shop:3000/assets
+                - url: http://juice-shop:3000/redirect
             - type: spider
               parameters:
                 url: http://juice-shop:3000
-                maxDuration: 20
-                maxDepth: 5
-                maxChildren: 500
+                maxDuration: 15
+                maxDepth: 10
+                maxChildren: 0
             - type: spiderAjax
               parameters:
                 url: http://juice-shop:3000
-                maxDuration: 15
-                maxCrawlDepth: 5
+                maxDuration: 20
+                maxCrawlDepth: 10
                 numberOfBrowsers: 1
             - type: passiveScan-wait
               parameters:
-                maxDuration: 10
+                maxDuration: 5
             - type: activeScan
               parameters:
                 context: Juice Shop
                 policy: Default Policy
-                maxRuleDurationInMins: 5
-                maxScanDurationInMins: 60
+                maxRuleDurationInMins: 3
+                maxScanDurationInMins: 80
                 maxAlertsPerRule: 10
                 threadPerHost: 10
                 delayInMs: 0
@@ -157,6 +183,28 @@ jobs:
         with:
           name: zap-report
           path: zap.xml
+
+      - name: Show ZAP Findings Summary
+        run: |
+          if [ -f zap.xml ]; then
+            echo "=== ZAP SCAN RESULTS ==="
+            TOTAL_ALERTS=$(grep -c '<alertitem>' zap.xml || echo "0")
+            echo "🎯 Total Findings: $TOTAL_ALERTS"
+            
+            HIGH=$(grep -c '<riskcode>3</riskcode>' zap.xml || echo "0")
+            MEDIUM=$(grep -c '<riskcode>2</riskcode>' zap.xml || echo "0")
+            LOW=$(grep -c '<riskcode>1</riskcode>' zap.xml || echo "0")
+            INFO=$(grep -c '<riskcode>0</riskcode>' zap.xml || echo "0")
+            
+            echo "📊 Breakdown:"
+            echo "   High: $HIGH"
+            echo "   Medium: $MEDIUM"
+            echo "   Low: $LOW"
+            echo "   Info: $INFO"
+          else
+            echo "⚠️ zap.xml not found"
+          fi
+        if: always()
 
       - name: Cleanup
         if: always()
@@ -196,6 +244,7 @@ jobs:
           du -h zap.xml
 
       - name: Upload Semgrep to DefectDojo
+        continue-on-error: true
         run: |
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DEFECTDOJO_API_KEY" \
@@ -217,11 +266,11 @@ jobs:
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "✅ Semgrep upload successful"
           else
-            echo "❌ Semgrep upload failed"
-            exit 1
+            echo "❌ Semgrep upload failed - DefectDojo may be offline"
           fi
 
       - name: Upload ZAP to DefectDojo
+        continue-on-error: true
         run: |
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DEFECTDOJO_API_KEY" \
@@ -243,6 +292,5 @@ jobs:
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "✅ ZAP upload successful"
           else
-            echo "❌ ZAP upload failed"
-            exit 1
+            echo "❌ ZAP upload failed - DefectDojo may be offline"
           fi
