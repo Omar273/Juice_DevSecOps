@@ -3,7 +3,7 @@ name: DevSecOps Pipeline (Semgrep → ZAP → DefectDojo)
 on:
   push:
     branches: ["main"]
-  pull_request:
+  pull_request: 
 
 env:
   JUICE_SHOP_IMAGE: bkimminich/juice-shop
