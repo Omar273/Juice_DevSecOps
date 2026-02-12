@@ -103,24 +103,25 @@ jobs:
             - type: spider
               parameters:
                 url: http://juice-shop:3000
-                maxDuration: 0
-                maxDepth: 0
-                maxChildren: 0
+                maxDuration: 20
+                maxDepth: 5
+                maxChildren: 500
             - type: spiderAjax
               parameters:
                 url: http://juice-shop:3000
-                maxDuration: 0
-                maxCrawlDepth: 0
-                numberOfBrowsers: 4
+                maxDuration: 15
+                maxCrawlDepth: 5
+                numberOfBrowsers: 1
             - type: passiveScan-wait
               parameters:
-                maxDuration: 0
+                maxDuration: 10
             - type: activeScan
               parameters:
                 context: Juice Shop
                 policy: Default Policy
-                maxRuleDurationInMins: 0
-                maxScanDurationInMins: 0
+                maxRuleDurationInMins: 5
+                maxScanDurationInMins: 60
+                maxAlertsPerRule: 10
                 threadPerHost: 10
                 delayInMs: 0
             - type: report
@@ -143,7 +144,7 @@ jobs:
             -v $(pwd):/zap/wrk \
             ghcr.io/zaproxy/zaproxy:stable \
             zap.sh -cmd -autorun /zap/wrk/automation.yaml || true
-        timeout-minutes: 90
+        timeout-minutes: 120
 
       - name: Upload ZAP HTML Report 
         uses: actions/upload-artifact@v4
