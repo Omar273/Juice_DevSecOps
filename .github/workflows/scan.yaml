@@ -1,9 +1,10 @@
-name: DevSecOps Pipeline (Semgrep → ZAP → DefectDojo)
+name:  DevSecOps Pipeline (SAST + DAST + SCA)
 
 on:
   push:
     branches: ["main"]
   pull_request:
+  workflow_dispatch:
 
 env:
   JUICE_SHOP_IMAGE: bkimminich/juice-shop
@@ -13,48 +14,259 @@ env:
 
 jobs:
 # =========================
-# 1️⃣ BUILD
+# 1️⃣ BUILD & CHECKOUT
 # =========================
   build:
-    name: Build
+    name: Build & Checkout
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better analysis
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
       - name: Build step
         run: echo "Build completed"
 
 # =========================
-# 2️⃣ SAST (SEMGREP)
+# 2️⃣ SCA - SOFTWARE COMPOSITION ANALYSIS
 # =========================
-  sast:
-    name: SAST - Semgrep
+  sca-dependency-check:
+    name: SCA - OWASP Dependency Check
     needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Clone Juice Shop for Analysis
+        run: |
+          git clone https://github.com/juice-shop/juice-shop.git juice-shop-repo
+          cd juice-shop-repo
+          npm install --package-lock-only || true
+      
+      - name: Run OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'juice-shop'
+          path: './juice-shop-repo'
+          format: 'ALL'
+          args: >
+            --enableRetired
+            --enableExperimental
+            --nvdApiKey ${{ secrets.NVD_API_KEY }}
+      
+      - name: Upload Dependency Check Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: reports/
+        if: always()
+
+  sca-snyk:
+    name: SCA - Snyk
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Clone Juice Shop
+        run: |
+          git clone https://github.com/juice-shop/juice-shop.git juice-shop-repo
+          cd juice-shop-repo
+          npm install || true
+      
+      - name: Run Snyk to check for vulnerabilities
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --all-projects --json-file-output=snyk.json --severity-threshold=low
+          command: test
+          working-directory: ./juice-shop-repo
+      
+      - name: Upload Snyk Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-report
+          path: juice-shop-repo/snyk.json
+        if: always()
+
+  sca-trivy:
+    name: SCA - Trivy
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'bkimminich/juice-shop:latest'
+          format: 'json'
+          output: 'trivy-results.json'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+      
+      - name: Upload Trivy Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-results.json
+        if: always()
+
+# =========================
+# 3️⃣ SAST - STATIC APPLICATION SECURITY TESTING
+# =========================
+  sast-semgrep:
+    name: SAST - Semgrep (Enhanced)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Clone Juice Shop for SAST
+        run: git clone https://github.com/juice-shop/juice-shop.git juice-shop-repo
+      
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      
       - name: Install Semgrep
         run: pip install semgrep
-      - name: Run Semgrep Scan
-        run: semgrep scan --config=p/ci --json . > semgrep.json || true
-      - name: Debug Semgrep Results
+      
+      - name: Run Semgrep with Multiple Rulesets
+        run: |
+          cd juice-shop-repo
+          semgrep scan \
+            --config=p/security-audit \
+            --config=p/nodejs \
+            --config=p/javascript \
+            --config=p/typescript \
+            --config=p/owasp-top-ten \
+            --config=p/expressjs \
+            --config=p/sql-injection \
+            --config=p/xss \
+            --config=p/command-injection \
+            --json \
+            --max-target-bytes=5000000 \
+            . > ../semgrep.json || true
+      
+      - name: Show Semgrep Summary
         run: |
           FINDINGS=$(python3 -c "import json; d=json.load(open('semgrep.json')); print(len(d.get('results', [])))")
-          echo "Semgrep findings: $FINDINGS"
-      - name: Upload Semgrep Artifact
+          echo "🎯 Semgrep findings: $FINDINGS"
+      
+      - name: Upload Semgrep Report
         uses: actions/upload-artifact@v4
         with:
           name: semgrep-report
           path: semgrep.json
 
+  sast-bandit:
+    name: SAST - Bandit (Python)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Clone Juice Shop
+        run: git clone https://github.com/juice-shop/juice-shop.git juice-shop-repo
+      
+      - name: Install Bandit
+        run: pip install bandit
+      
+      - name: Run Bandit
+        run: |
+          cd juice-shop-repo
+          bandit -r . -f json -o ../bandit.json --severity-level all || true
+        continue-on-error: true
+      
+      - name: Upload Bandit Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit.json
+        if: always()
+
+  sast-eslint:
+    name: SAST - ESLint Security
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Clone Juice Shop
+        run: git clone https://github.com/juice-shop/juice-shop.git juice-shop-repo
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install ESLint and Security Plugins
+        run: |
+          cd juice-shop-repo
+          npm install --save-dev eslint \
+            eslint-plugin-security \
+            eslint-plugin-security-node \
+            @microsoft/eslint-plugin-sdl || true
+      
+      - name: Run ESLint Security Scan
+        run: |
+          cd juice-shop-repo
+          npx eslint . \
+            --plugin security \
+            --plugin security-node \
+            --rule 'security/detect-object-injection: error' \
+            --rule 'security/detect-non-literal-regexp: error' \
+            --rule 'security/detect-unsafe-regex: error' \
+            --rule 'security/detect-buffer-noassert: error' \
+            --rule 'security/detect-eval-with-expression: error' \
+            --rule 'security/detect-no-csrf-before-method-override: error' \
+            --rule 'security/detect-possible-timing-attacks: error' \
+            --format json \
+            --output-file ../eslint-security.json || true
+        continue-on-error: true
+      
+      - name: Upload ESLint Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: eslint-security-report
+          path: eslint-security.json
+        if: always()
+
+  sast-nodejsscan:
+    name: SAST - NodeJsScan
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Clone Juice Shop
+        run: git clone https://github.com/juice-shop/juice-shop.git juice-shop-repo
+      
+      - name: NodeJsScan
+        uses: ajinabraham/njsscan-action@master
+        with:
+          args: 'juice-shop-repo --json -o nodejsscan.json || true'
+      
+      - name: Upload NodeJsScan Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodejsscan-report
+          path: nodejsscan.json
+        if: always()
+
 # =========================
-# 3️⃣ DAST (ZAP) - EXACT COLLEAGUE METHOD
+# 4️⃣ DAST - DYNAMIC APPLICATION SECURITY TESTING
 # =========================
-  dast:
-    name: DAST - OWASP ZAP
-    needs: sast
+  dast-zap-comprehensive:
+    name: DAST - OWASP ZAP (Comprehensive)
+    needs: [sast-semgrep, sca-trivy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,22 +282,23 @@ jobs:
             -p 3000:3000 \
             ${{ env.JUICE_SHOP_IMAGE }}
 
-      - name: Wait for Juice Shop to start
-        run: sleep 60
-
-      - name: Create Juice Shop User
+      - name: Wait for Juice Shop
         run: |
-          curl -s -X POST http://localhost:3000/api/Users \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"email\": \"${{ env.ZAP_USER_EMAIL }}\",
-              \"password\": \"${{ env.ZAP_USER_PASSWORD }}\"
-            }" || true
+          echo "Waiting for Juice Shop to start..."
+          sleep 60
+          for i in {1..30}; do
+            if curl -f http://localhost:3000 >/dev/null 2>&1; then
+              echo "✅ Juice Shop is ready!"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 2
+          done
 
       - name: Fix workspace permissions
         run: chmod -R 777 "$(pwd)"
 
-      - name: Create URL Seed File
+      - name: Create Comprehensive URL Seed File
         run: |
           cat > urls.txt << 'EOF'
           http://juice-shop:3000/
@@ -96,20 +309,59 @@ jobs:
           http://juice-shop:3000/#/basket
           http://juice-shop:3000/#/contact
           http://juice-shop:3000/#/administration
+          http://juice-shop:3000/#/about
+          http://juice-shop:3000/#/privacy-security
+          http://juice-shop:3000/#/photo-wall
+          http://juice-shop:3000/#/deluxe-membership
+          http://juice-shop:3000/#/accounting
+          http://juice-shop:3000/#/order-history
+          http://juice-shop:3000/#/wallet
+          http://juice-shop:3000/#/address
+          http://juice-shop:3000/#/payment
+          http://juice-shop:3000/#/saved-payment-methods
+          http://juice-shop:3000/#/change-password
+          http://juice-shop:3000/#/2fa
+          http://juice-shop:3000/#/privacy-policy
+          http://juice-shop:3000/#/data-export
+          http://juice-shop:3000/#/last-login-ip
+          http://juice-shop:3000/#/recycle
+          http://juice-shop:3000/#/complaint
+          http://juice-shop:3000/#/chatbot
+          http://juice-shop:3000/#/score-board
           http://juice-shop:3000/api/Users
           http://juice-shop:3000/api/Products
           http://juice-shop:3000/api/Challenges
           http://juice-shop:3000/api/Feedbacks
           http://juice-shop:3000/api/BasketItems
+          http://juice-shop:3000/api/Quantitys
+          http://juice-shop:3000/api/Cards
+          http://juice-shop:3000/api/Addresss
+          http://juice-shop:3000/api/SecurityQuestions
+          http://juice-shop:3000/api/SecurityAnswers
           http://juice-shop:3000/rest/user/login
           http://juice-shop:3000/rest/user/whoami
           http://juice-shop:3000/rest/products/search
           http://juice-shop:3000/rest/basket/1
+          http://juice-shop:3000/rest/admin/application-version
+          http://juice-shop:3000/rest/admin/application-configuration
+          http://juice-shop:3000/rest/user/authentication-details
+          http://juice-shop:3000/rest/user/data-export
+          http://juice-shop:3000/rest/user/erasure-request
+          http://juice-shop:3000/rest/deluxe-membership
+          http://juice-shop:3000/rest/memories
+          http://juice-shop:3000/rest/image-captcha
+          http://juice-shop:3000/rest/continue-code
+          http://juice-shop:3000/rest/languages
+          http://juice-shop:3000/rest/admin/application-version
           http://juice-shop:3000/ftp
           http://juice-shop:3000/assets
+          http://juice-shop:3000/redirect
+          http://juice-shop:3000/metrics
+          http://juice-shop:3000/profile
+          http://juice-shop:3000/snippets
           EOF
 
-      - name: Run OWASP ZAP Full Scan with API Control
+      - name: Run OWASP ZAP Maximum Coverage Scan
         run: |
           docker run --rm \
             --user root \
@@ -123,47 +375,46 @@ jobs:
                 -config api.addrs.addr.name=.* \
                 -config api.addrs.addr.regex=true &
               
-              sleep 15
+              sleep 20
               
-              echo '=== Accessing seed URLs ==='
+              echo '=== Accessing all seed URLs ==='
               while read url; do
                 curl -s \"http://localhost:8080/JSON/core/action/accessUrl/?url=\$url\" > /dev/null
-                echo \"Accessed: \$url\"
+                echo \"✓ Accessed: \$url\"
+                sleep 1
               done < /zap/wrk/urls.txt
               
-              sleep 5
+              sleep 10
               
-              echo '=== Running Traditional Spider ==='
-              SPIDER_SCAN_ID=\$(curl -s 'http://localhost:8080/JSON/spider/action/scan/?url=http://juice-shop:3000&maxChildren=0&recurse=true' | jq -r '.scan')
+              echo '=== Running Traditional Spider (Deep Crawl) ==='
+              SPIDER_SCAN_ID=\$(curl -s 'http://localhost:8080/JSON/spider/action/scan/?url=http://juice-shop:3000&maxChildren=0&recurse=true&contextName=&subtreeOnly=false' | jq -r '.scan')
               echo \"Spider ID: \$SPIDER_SCAN_ID\"
               
-              # Wait for spider
               while true; do
                 STATUS=\$(curl -s \"http://localhost:8080/JSON/spider/view/status/?scanId=\$SPIDER_SCAN_ID\" | jq -r '.status')
-                echo \"Spider: \$STATUS%\"
+                echo \"Spider Progress: \$STATUS%\"
                 [ \"\$STATUS\" = \"100\" ] && break
                 sleep 5
               done
               
-              echo '=== Running AJAX Spider ==='
-              curl -s 'http://localhost:8080/JSON/ajaxSpider/action/scan/?url=http://juice-shop:3000' > /dev/null
-              sleep 10
+              echo '=== Running AJAX Spider (JavaScript Heavy App) ==='
+              curl -s 'http://localhost:8080/JSON/ajaxSpider/action/scan/?url=http://juice-shop:3000&inScope=&contextName=&subtreeOnly=' > /dev/null
+              sleep 15
               
-              # Wait for AJAX spider
               AJAX_TIMEOUT=0
-              while [ \$AJAX_TIMEOUT -lt 600 ]; do
+              while [ \$AJAX_TIMEOUT -lt 900 ]; do
                 STATUS=\$(curl -s 'http://localhost:8080/JSON/ajaxSpider/view/status/' | jq -r '.status')
-                echo \"AJAX Spider: \$STATUS\"
+                echo \"AJAX Spider Status: \$STATUS\"
                 [ \"\$STATUS\" = \"stopped\" ] && break
-                sleep 5
-                AJAX_TIMEOUT=\$((AJAX_TIMEOUT + 5))
+                sleep 10
+                AJAX_TIMEOUT=\$((AJAX_TIMEOUT + 10))
               done
               
               URLS=\$(curl -s 'http://localhost:8080/JSON/core/view/numberOfMessages/' | jq -r '.numberOfMessages')
-              echo \"Total URLs discovered: \$URLS\"
+              echo \"📊 Total URLs discovered: \$URLS\"
               
-              echo '=== Waiting for Passive Scan ==='
-              sleep 10
+              echo '=== Waiting for Passive Scan to Complete ==='
+              sleep 15
               while true; do
                 REMAINING=\$(curl -s 'http://localhost:8080/JSON/pscan/view/recordsToScan/' | jq -r '.recordsToScan')
                 echo \"Passive scan remaining: \$REMAINING\"
@@ -172,71 +423,83 @@ jobs:
               done
               
               PASSIVE_ALERTS=\$(curl -s 'http://localhost:8080/JSON/core/view/numberOfAlerts/' | jq -r '.numberOfAlerts')
-              echo \"Alerts after passive scan: \$PASSIVE_ALERTS\"
+              echo \"🔍 Alerts after passive scan: \$PASSIVE_ALERTS\"
               
-              echo '=== Enabling ALL Active Scanners ==='
+              echo '=== Configuring Active Scan for Maximum Coverage ==='
               curl -s 'http://localhost:8080/JSON/ascan/action/enableAllScanners/' > /dev/null
               curl -s 'http://localhost:8080/JSON/ascan/action/setOptionAttackStrength/?String=INSANE' > /dev/null
               curl -s 'http://localhost:8080/JSON/ascan/action/setOptionAlertThreshold/?String=LOW' > /dev/null
               curl -s 'http://localhost:8080/JSON/ascan/action/setOptionThreadPerHost/?Integer=10' > /dev/null
-              curl -s 'http://localhost:8080/JSON/ascan/action/setOptionMaxAlertsPerRule/?Integer=10' > /dev/null
+              curl -s 'http://localhost:8080/JSON/ascan/action/setOptionMaxAlertsPerRule/?Integer=20' > /dev/null
+              curl -s 'http://localhost:8080/JSON/ascan/action/setOptionMaxRuleDurationInMins/?Integer=30' > /dev/null
+              curl -s 'http://localhost:8080/JSON/ascan/action/setOptionMaxScanDurationInMins/?Integer=120' > /dev/null
               
-              echo '=== Running Active Scan ==='
-              ASCAN_ID=\$(curl -s 'http://localhost:8080/JSON/ascan/action/scan/?url=http://juice-shop:3000&recurse=true&inScopeOnly=false' | jq -r '.scan')
+              echo '=== Running Active Scan (High Intensity) ==='
+              ASCAN_ID=\$(curl -s 'http://localhost:8080/JSON/ascan/action/scan/?url=http://juice-shop:3000&recurse=true&inScopeOnly=false&scanPolicyName=&method=&postData=' | jq -r '.scan')
               echo \"Active Scan ID: \$ASCAN_ID\"
               
-              # Wait for active scan with timeout
               ASCAN_TIMEOUT=0
-              while [ \$ASCAN_TIMEOUT -lt 5400 ]; do
+              while [ \$ASCAN_TIMEOUT -lt 7200 ]; do
                 STATUS=\$(curl -s \"http://localhost:8080/JSON/ascan/view/status/?scanId=\$ASCAN_ID\" | jq -r '.status')
                 ALERTS=\$(curl -s 'http://localhost:8080/JSON/core/view/numberOfAlerts/' | jq -r '.numberOfAlerts')
-                echo \"Active scan: \$STATUS% | Alerts: \$ALERTS\"
+                echo \"Active Scan Progress: \$STATUS% | Total Alerts: \$ALERTS\"
                 [ \"\$STATUS\" = \"100\" ] && break
-                sleep 10
-                ASCAN_TIMEOUT=\$((ASCAN_TIMEOUT + 10))
+                sleep 15
+                ASCAN_TIMEOUT=\$((ASCAN_TIMEOUT + 15))
               done
               
-              echo '=== Final Results ==='
+              echo '=== Final Scan Results ==='
               FINAL_ALERTS=\$(curl -s 'http://localhost:8080/JSON/core/view/numberOfAlerts/' | jq -r '.numberOfAlerts')
-              echo \"🎯 TOTAL FINDINGS: \$FINAL_ALERTS\"
+              echo \"\"
+              echo \"╔═══════════════════════════════════╗\"
+              echo \"║  🎯 TOTAL FINDINGS: \$FINAL_ALERTS\"
+              echo \"╚═══════════════════════════════════╝\"
+              echo \"\"
               
-              echo '=== Generating Reports ==='
+              echo '=== Generating Detailed Reports ==='
               curl -s 'http://localhost:8080/OTHER/core/other/xmlreport/' -o /zap/wrk/zap.xml
               curl -s 'http://localhost:8080/OTHER/core/other/htmlreport/' -o /zap/wrk/zap.html
+              curl -s 'http://localhost:8080/OTHER/core/other/jsonreport/' -o /zap/wrk/zap.json
               
-              echo 'Scan complete!'
+              echo '✅ Comprehensive ZAP scan complete!'
             "
-        timeout-minutes: 120
+        timeout-minutes: 180
 
-      - name: Upload ZAP HTML Report 
+      - name: Upload ZAP Reports
         uses: actions/upload-artifact@v4
         with:
-          name: zap-html-report
-          path: zap.html
+          name: zap-comprehensive-reports
+          path: |
+            zap.xml
+            zap.html
+            zap.json
+        if: always()
 
-      - name: Upload ZAP XML Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: zap-report
-          path: zap.xml
-
-      - name: Show ZAP Findings Summary
+      - name: Detailed ZAP Findings Summary
         run: |
           if [ -f zap.xml ]; then
-            echo "=== ZAP SCAN RESULTS ==="
+            echo "╔════════════════════════════════════════╗"
+            echo "║     🔒 ZAP COMPREHENSIVE RESULTS       ║"
+            echo "╚════════════════════════════════════════╝"
+            
             TOTAL_ALERTS=$(grep -c '<alertitem>' zap.xml || echo "0")
             echo "🎯 Total Findings: $TOTAL_ALERTS"
+            echo ""
             
             HIGH=$(grep -c '<riskcode>3</riskcode>' zap.xml || echo "0")
             MEDIUM=$(grep -c '<riskcode>2</riskcode>' zap.xml || echo "0")
             LOW=$(grep -c '<riskcode>1</riskcode>' zap.xml || echo "0")
             INFO=$(grep -c '<riskcode>0</riskcode>' zap.xml || echo "0")
             
-            echo "📊 Breakdown:"
-            echo "   High: $HIGH"
-            echo "   Medium: $MEDIUM"
-            echo "   Low: $LOW"
-            echo "   Info: $INFO"
+            echo "📊 Severity Breakdown:"
+            echo "   🔴 High:   $HIGH"
+            echo "   🟠 Medium: $MEDIUM"
+            echo "   🟡 Low:    $LOW"
+            echo "   🔵 Info:   $INFO"
+            echo ""
+            
+            echo "🔍 Top Vulnerabilities Found:"
+            grep '<name>' zap.xml | head -10 | sed 's/.*<name>\(.*\)<\/name>/   • \1/'
           else
             echo "⚠️ zap.xml not found"
           fi
@@ -249,84 +512,158 @@ jobs:
           docker rm juice-shop || true
           docker network rm zap-net || true
 
-# =========================
-# 4️⃣ DEFECTDOJO IMPORT
-# =========================
-  defectdojo:
-    name: Upload to DefectDojo
-    needs: [sast, dast]
+  dast-nuclei:
+    name: DAST - Nuclei Scanner
+    needs: [sast-semgrep]
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Juice Shop
+        run: |
+          docker run -d --name juice-shop -p 3000:3000 ${{ env.JUICE_SHOP_IMAGE }}
+          sleep 60
+      
+      - name: Run Nuclei Scan
+        uses: projectdiscovery/nuclei-action@main
+        with:
+          target: http://localhost:3000
+          output: nuclei-results.txt
+          json: true
+          severity: critical,high,medium,low,info
+      
+      - name: Upload Nuclei Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuclei-report
+          path: nuclei-results.txt
+        if: always()
+      
+      - name: Cleanup
+        if: always()
+        run: docker stop juice-shop && docker rm juice-shop
+
+# =========================
+# 5️⃣ DEFECTDOJO IMPORT
+# =========================
+  defectdojo-import:
+    name: Upload All Scans to DefectDojo
+    needs: [sast-semgrep, sast-nodejsscan, dast-zap-comprehensive, sca-dependency-check, sca-trivy]
+    runs-on: ubuntu-latest
+    if: always()
     env:
       DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
       DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
     steps:
-      - name: Download Semgrep Artifact
+      - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: semgrep-report
-
-      - name: Download ZAP Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: zap-report
-
-      - name: Debug downloaded files
+          path: scan-results
+      
+      - name: List Downloaded Files
         run: |
-          echo "Files in workspace:"
-          ls -lah
-          echo "Semgrep file size:"
-          du -h semgrep.json
-          echo "ZAP file size:"
-          du -h zap.xml
-
+          echo "📦 Downloaded scan results:"
+          find scan-results -type f -exec ls -lh {} \;
+      
       - name: Upload Semgrep to DefectDojo
         continue-on-error: true
         run: |
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
-            -H "Authorization: Token $DEFECTDOJO_API_KEY" \
-            -F "scan_type=Semgrep JSON Report" \
-            -F "file=@semgrep.json" \
-            -F "product_name=DevSecOps_Project" \
-            -F "engagement_name=GitHub Actions" \
-            -F "test_title=Semgrep SAST Scan" \
-            -F "auto_create_context=true" \
-            -F "active=true" \
-            -F "verified=false")
-          
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          
-          echo "HTTP Status: $HTTP_CODE"
-          echo "Response: $BODY"
-          
-          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-            echo "✅ Semgrep upload successful"
-          else
-            echo "❌ Semgrep upload failed - DefectDojo may be offline"
+          if [ -f scan-results/semgrep-report/semgrep.json ]; then
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DEFECTDOJO_API_KEY" \
+              -F "scan_type=Semgrep JSON Report" \
+              -F "file=@scan-results/semgrep-report/semgrep.json" \
+              -F "product_name=DevSecOps_JuiceShop" \
+              -F "engagement_name=GitHub Actions Pipeline" \
+              -F "test_title=Semgrep SAST Scan" \
+              -F "auto_create_context=true" \
+              -F "active=true" \
+              -F "verified=false")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            echo "Semgrep Upload - HTTP Status: $HTTP_CODE"
+            [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && echo "✅ Success" || echo "❌ Failed"
           fi
-
+      
       - name: Upload ZAP to DefectDojo
         continue-on-error: true
         run: |
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
-            -H "Authorization: Token $DEFECTDOJO_API_KEY" \
-            -F "scan_type=ZAP Scan" \
-            -F "file=@zap.xml" \
-            -F "product_name=DevSecOps_Project" \
-            -F "engagement_name=GitHub Actions" \
-            -F "test_title=OWASP ZAP DAST Scan" \
-            -F "auto_create_context=true" \
-            -F "active=true" \
-            -F "verified=false")
-          
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          
-          echo "HTTP Status: $HTTP_CODE"
-          echo "Response: $BODY"
-          
-          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-            echo "✅ ZAP upload successful"
-          else
-            echo "❌ ZAP upload failed - DefectDojo may be offline"
+          if [ -f scan-results/zap-comprehensive-reports/zap.xml ]; then
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DEFECTDOJO_API_KEY" \
+              -F "scan_type=ZAP Scan" \
+              -F "file=@scan-results/zap-comprehensive-reports/zap.xml" \
+              -F "product_name=DevSecOps_JuiceShop" \
+              -F "engagement_name=GitHub Actions Pipeline" \
+              -F "test_title=OWASP ZAP DAST Scan" \
+              -F "auto_create_context=true" \
+              -F "active=true" \
+              -F "verified=false")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            echo "ZAP Upload - HTTP Status: $HTTP_CODE"
+            [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && echo "✅ Success" || echo "❌ Failed"
           fi
+      
+      - name: Upload Trivy to DefectDojo
+        continue-on-error: true
+        run: |
+          if [ -f scan-results/trivy-report/trivy-results.json ]; then
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DEFECTDOJO_API_KEY" \
+              -F "scan_type=Trivy Scan" \
+              -F "file=@scan-results/trivy-report/trivy-results.json" \
+              -F "product_name=DevSecOps_JuiceShop" \
+              -F "engagement_name=GitHub Actions Pipeline" \
+              -F "test_title=Trivy SCA Scan" \
+              -F "auto_create_context=true" \
+              -F "active=true" \
+              -F "verified=false")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            echo "Trivy Upload - HTTP Status: $HTTP_CODE"
+            [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && echo "✅ Success" || echo "❌ Failed"
+          fi
+      
+      - name: Upload Dependency Check to DefectDojo
+        continue-on-error: true
+        run: |
+          if [ -f scan-results/dependency-check-report/dependency-check-report.xml ]; then
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DEFECTDOJO_API_KEY" \
+              -F "scan_type=Dependency Check Scan" \
+              -F "file=@scan-results/dependency-check-report/dependency-check-report.xml" \
+              -F "product_name=DevSecOps_JuiceShop" \
+              -F "engagement_name=GitHub Actions Pipeline" \
+              -F "test_title=OWASP Dependency Check" \
+              -F "auto_create_context=true" \
+              -F "active=true" \
+              -F "verified=false")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            echo "Dependency Check Upload - HTTP Status: $HTTP_CODE"
+            [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && echo "✅ Success" || echo "❌ Failed"
+          fi
+      
+      - name: Upload NodeJsScan to DefectDojo
+        continue-on-error: true
+        run: |
+          if [ -f scan-results/nodejsscan-report/nodejsscan.json ]; then
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DEFECTDOJO_API_KEY" \
+              -F "scan_type=NodeJsScan Scan" \
+              -F "file=@scan-results/nodejsscan-report/nodejsscan.json" \
+              -F "product_name=DevSecOps_JuiceShop" \
+              -F "engagement_name=GitHub Actions Pipeline" \
+              -F "test_title=NodeJsScan SAST" \
+              -F "auto_create_context=true" \
+              -F "active=true" \
+              -F "verified=false")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            echo "NodeJsScan Upload - HTTP Status: $HTTP_CODE"
+            [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] && echo "✅ Success" || echo "❌ Failed"
+          fi
+
+
+      
