@@ -530,7 +530,28 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: reports
-      
+
+      # ── Build a clean, slug-safe commit title ──────────────────────────────
+      # ${{ github.event.head_commit.message }} gives the full commit message.
+      # We take the first line only and strip characters that might break
+      # shell quoting or API field values, then truncate to 72 characters.
+      - name: Set commit title env var
+        run: |
+          RAW_MSG=$(cat << 'COMMIT_EOF'
+          ${{ github.event.head_commit.message }}
+          COMMIT_EOF
+          )
+          # First line only, strip leading/trailing whitespace
+          FIRST_LINE=$(echo "$RAW_MSG" | head -n 1 | xargs)
+          # Remove characters unsafe for form fields
+          CLEAN=$(echo "$FIRST_LINE" | tr -d '"'"'"'\\`' | cut -c1-72)
+          # Fallback when triggered manually or commit message is empty
+          if [ -z "$CLEAN" ]; then
+            CLEAN="Manual Run"
+          fi
+          echo "COMMIT_TITLE=$CLEAN" >> $GITHUB_ENV
+          echo "📝 Commit title: $CLEAN"
+
       - name: Upload Semgrep
         continue-on-error: true
         run: |
@@ -540,14 +561,14 @@ jobs:
               -F "scan_type=Semgrep JSON Report" \
               -F "file=@reports/semgrep-report/semgrep.json" \
               -F "product_name=DevSecOps_Project" \
-              -F "engagement_name=GitHub Actions - $(date +%Y-%m-%d)" \
-              -F "test_title=Semgrep SAST (ULTRA)" \
+              -F "engagement_name=GitHub Actions - $(date +%Y-%m-%d) - ${{ env.COMMIT_TITLE }}" \
+              -F "test_title=Semgrep SAST (ULTRA) (Semgrep JSON Report) - ${{ env.COMMIT_TITLE }}" \
               -F "auto_create_context=true" \
               -F "active=true" \
               -F "verified=false" 2>&1 | tee semgrep.log
             grep -q '"id":' semgrep.log && echo "✅ Semgrep" || echo "❌ Semgrep"
           fi
-      
+
       - name: Upload ZAP
         continue-on-error: true
         run: |
@@ -557,14 +578,14 @@ jobs:
               -F "scan_type=ZAP Scan" \
               -F "file=@reports/zap-reports/zap.xml" \
               -F "product_name=DevSecOps_Project" \
-              -F "engagement_name=GitHub Actions - $(date +%Y-%m-%d)" \
-              -F "test_title=ZAP DAST (ULTRA AGGRESSIVE)" \
+              -F "engagement_name=GitHub Actions - $(date +%Y-%m-%d) - ${{ env.COMMIT_TITLE }}" \
+              -F "test_title=ZAP DAST (ULTRA AGGRESSIVE) (ZAP Scan) - ${{ env.COMMIT_TITLE }}" \
               -F "auto_create_context=true" \
               -F "active=true" \
               -F "verified=false" 2>&1 | tee zap.log
             grep -q '"id":' zap.log && echo "✅ ZAP" || echo "❌ ZAP"
           fi
-      
+
       - name: Upload Trivy
         continue-on-error: true
         run: |
@@ -574,14 +595,14 @@ jobs:
               -F "scan_type=Trivy Scan" \
               -F "file=@reports/trivy-report/trivy-results.json" \
               -F "product_name=DevSecOps_Project" \
-              -F "engagement_name=GitHub Actions - $(date +%Y-%m-%d)" \
-              -F "test_title=Trivy SCA (All Scanners)" \
+              -F "engagement_name=GitHub Actions - $(date +%Y-%m-%d) - ${{ env.COMMIT_TITLE }}" \
+              -F "test_title=Trivy SCA (All Scanners) (Trivy Scan) - ${{ env.COMMIT_TITLE }}" \
               -F "auto_create_context=true" \
               -F "active=true" \
               -F "verified=false" 2>&1 | tee trivy.log
             grep -q '"id":' trivy.log && echo "✅ Trivy" || echo "❌ Trivy"
           fi
-      
+
       - name: Upload Dependency Check
         continue-on-error: true
         run: |
@@ -591,8 +612,8 @@ jobs:
               -F "scan_type=Dependency Check Scan" \
               -F "file=@reports/dependency-check-report/dependency-check-report.xml" \
               -F "product_name=DevSecOps_Project" \
-              -F "engagement_name=GitHub Actions - $(date +%Y-%m-%d)" \
-              -F "test_title=Dependency Check (All Analyzers)" \
+              -F "engagement_name=GitHub Actions - $(date +%Y-%m-%d) - ${{ env.COMMIT_TITLE }}" \
+              -F "test_title=Dependency Check (All Analyzers) (Dependency Check Scan) - ${{ env.COMMIT_TITLE }}" \
               -F "auto_create_context=true" \
               -F "active=true" \
               -F "verified=false" 2>&1 | tee depcheck.log
