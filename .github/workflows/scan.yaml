@@ -1,4 +1,4 @@
-name: DevSecOps Pipeline - ULTRA AGGRESSIVE (Maximum Findings)
+name: DevSecOps Pipeline - ULTRA AGGRESSIVE (Maximum Findings) 
 
 on:
   push:
