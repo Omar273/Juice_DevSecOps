@@ -618,7 +618,31 @@ jobs:
               -F "active=true" \
               -F "verified=false" 2>&1 | tee depcheck.log
             grep -q '"id":' depcheck.log && echo "✅ DepCheck" || echo "❌ DepCheck"
+          fi  
+  quality-gate:
+    name: Security Quality Gate
+    needs: defectdojo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch critical/high counts
+        env:
+          DD_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DD_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          CRIT=$(curl -s -H "Authorization: Token $DD_KEY" \
+            "$DD_URL/api/v2/findings/?severity=Critical&active=true&product_name=DevSecOps_Project" \
+            | jq '.count // 0')
+          HIGH=$(curl -s -H "Authorization: Token $DD_KEY" \
+            "$DD_URL/api/v2/findings/?severity=High&active=true&product_name=DevSecOps_Project" \
+            | jq '.count // 0')
+          echo "Critical: $CRIT | High: $HIGH"
+          if [ "$CRIT" -gt 5 ] || [ "$HIGH" -gt 20 ]; then
+            echo "Quality gate failed"
+            exit 1
           fi
+          echo "Quality gate passed"
+
+  
 
 # =========================
 # 6️⃣ FINAL SUMMARY
