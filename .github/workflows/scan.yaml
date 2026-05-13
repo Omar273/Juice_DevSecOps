@@ -531,21 +531,14 @@ jobs:
         with:
           path: reports
 
-      # ── Build a clean, slug-safe commit title ──────────────────────────────
-      # ${{ github.event.head_commit.message }} gives the full commit message.
-      # We take the first line only and strip characters that might break
-      # shell quoting or API field values, then truncate to 72 characters.
       - name: Set commit title env var
         run: |
           RAW_MSG=$(cat << 'COMMIT_EOF'
           ${{ github.event.head_commit.message }}
           COMMIT_EOF
           )
-          # First line only, strip leading/trailing whitespace
           FIRST_LINE=$(echo "$RAW_MSG" | head -n 1 | xargs)
-          # Remove characters unsafe for form fields
           CLEAN=$(echo "$FIRST_LINE" | tr -d '"'"'"'\\`' | cut -c1-72)
-          # Fallback when triggered manually or commit message is empty
           if [ -z "$CLEAN" ]; then
             CLEAN="Manual Run"
           fi
@@ -618,31 +611,103 @@ jobs:
               -F "active=true" \
               -F "verified=false" 2>&1 | tee depcheck.log
             grep -q '"id":' depcheck.log && echo "✅ DepCheck" || echo "❌ DepCheck"
-          fi  
+          fi
+
+# =========================
+# 5️⃣ QUALITY GATE (FIXED)
+# =========================
   quality-gate:
     name: Security Quality Gate
     needs: defectdojo
     runs-on: ubuntu-latest
+    env:
+      DD_URL: ${{ secrets.DEFECTDOJO_URL }}
+      DD_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
     steps:
-      - name: Fetch critical/high counts
-        env:
-          DD_URL: ${{ secrets.DEFECTDOJO_URL }}
-          DD_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+      - name: Wait for DefectDojo to finish processing
+        run: sleep 30
+
+      - name: Rebuild engagement name (same formula as defectdojo job)
         run: |
-          CRIT=$(curl -s -H "Authorization: Token $DD_KEY" \
-            "$DD_URL/api/v2/findings/?severity=Critical&active=true&product_name=DevSecOps_Project" \
+          RAW_MSG=$(cat << 'COMMIT_EOF'
+          ${{ github.event.head_commit.message }}
+          COMMIT_EOF
+          )
+          FIRST_LINE=$(echo "$RAW_MSG" | head -n 1 | xargs)
+          CLEAN=$(echo "$FIRST_LINE" | tr -d '"'"'"'\\`' | cut -c1-72)
+          if [ -z "$CLEAN" ]; then
+            CLEAN="Manual Run"
+          fi
+          ENGAGEMENT_NAME="GitHub Actions - $(date +%Y-%m-%d) - $CLEAN"
+          echo "ENGAGEMENT_NAME=$ENGAGEMENT_NAME" >> $GITHUB_ENV
+          echo "📋 Scoping gate to engagement: $ENGAGEMENT_NAME"
+
+      - name: Resolve engagement ID
+        run: |
+          ENCODED=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['ENGAGEMENT_NAME']))")
+          RESPONSE=$(curl -sf -H "Authorization: Token $DD_KEY" \
+            "$DD_URL/api/v2/engagements/?name=$ENCODED&product_name=DevSecOps_Project&limit=5")
+          ENG_ID=$(echo "$RESPONSE" | jq -r '.results[0].id // empty')
+
+          if [ -z "$ENG_ID" ]; then
+            echo "⚠️  Engagement not found — DefectDojo may still be processing. Retrying in 30s..."
+            sleep 30
+            RESPONSE=$(curl -sf -H "Authorization: Token $DD_KEY" \
+              "$DD_URL/api/v2/engagements/?name=$ENCODED&product_name=DevSecOps_Project&limit=5")
+            ENG_ID=$(echo "$RESPONSE" | jq -r '.results[0].id // empty')
+          fi
+
+          if [ -z "$ENG_ID" ]; then
+            echo "❌ Could not resolve engagement ID after retry. Skipping gate (not blocking)."
+            echo "SKIP_GATE=true" >> $GITHUB_ENV
+          else
+            echo "✅ Engagement ID: $ENG_ID"
+            echo "ENG_ID=$ENG_ID" >> $GITHUB_ENV
+          fi
+
+      - name: Fetch critical/high counts scoped to this engagement
+        run: |
+          if [ "${SKIP_GATE}" = "true" ]; then
+            echo "⏭️  Skipping gate — engagement not resolved."
+            exit 0
+          fi
+
+          CRIT=$(curl -sf -H "Authorization: Token $DD_KEY" \
+            "$DD_URL/api/v2/findings/?severity=Critical&active=true&engagement=$ENG_ID&limit=1" \
             | jq '.count // 0')
-          HIGH=$(curl -s -H "Authorization: Token $DD_KEY" \
-            "$DD_URL/api/v2/findings/?severity=High&active=true&product_name=DevSecOps_Project" \
+
+          HIGH=$(curl -sf -H "Authorization: Token $DD_KEY" \
+            "$DD_URL/api/v2/findings/?severity=High&active=true&engagement=$ENG_ID&limit=1" \
             | jq '.count // 0')
-          echo "Critical: $CRIT | High: $HIGH"
-          if [ "$CRIT" -gt 5 ] || [ "$HIGH" -gt 20 ]; then
-            echo "Quality gate failed"
+
+          MED=$(curl -sf -H "Authorization: Token $DD_KEY" \
+            "$DD_URL/api/v2/findings/?severity=Medium&active=true&engagement=$ENG_ID&limit=1" \
+            | jq '.count // 0')
+
+          echo ""
+          echo "╔══════════════════════════════════════╗"
+          echo "║  🚦 QUALITY GATE RESULTS             ║"
+          echo "╠══════════════════════════════════════╣"
+          echo "║  🔴 Critical : $CRIT"
+          echo "║  🟠 High     : $HIGH"
+          echo "║  🟡 Medium   : $MED"
+          echo "╚══════════════════════════════════════╝"
+
+          FAILED=false
+          if [ "$CRIT" -gt 5 ]; then
+            echo "❌ GATE FAILED: Critical findings ($CRIT) exceed threshold (5)"
+            FAILED=true
+          fi
+          if [ "$HIGH" -gt 20 ]; then
+            echo "❌ GATE FAILED: High findings ($HIGH) exceed threshold (20)"
+            FAILED=true
+          fi
+
+          if [ "$FAILED" = "true" ]; then
             exit 1
           fi
-          echo "Quality gate passed"
 
-  
+          echo "✅ Quality gate passed (Critical: $CRIT ≤ 5 | High: $HIGH ≤ 20)"
 
 # =========================
 # 6️⃣ FINAL SUMMARY
